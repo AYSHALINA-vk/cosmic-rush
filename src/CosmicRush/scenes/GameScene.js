@@ -231,6 +231,12 @@ export default class GameScene extends Phaser.Scene {
     const onUp = () => {
       this.muteTapActive = false;
     };
+        this.steerOk = false;
+    const onDown = (p) => {
+      this.steerOk = p.y > this.hudBottom;
+    };
+    this.input.on("pointerdown", onDown);
+
     const onM = () => this.soundBtn.setText(this.audio.toggleMute() ? "🔇" : "🔊");
     const startAudio = () => this.audio.start();
     this.input.on("pointerup", onUp);
@@ -246,6 +252,7 @@ export default class GameScene extends Phaser.Scene {
       this.input.keyboard.off("keydown-M", onM);
       this.input.keyboard.off("keydown", startAudio);
       this.audio.destroy();
+      this.input.off("pointerdown", onDown);
     });
 
     // dev only: in the browser console, set __cr.t = 0 / 25 / 50 / 75 / 100 / 125 to jump levels
@@ -342,20 +349,46 @@ export default class GameScene extends Phaser.Scene {
     return { laneX: (width - laneW) / 2, laneW };
   }
 
-  layoutHud() {
+    layoutHud() {
     const { laneX, laneW } = this.getLane();
-    this.livesText.setPosition(laneX + 16, 14);
-    this.statusText.setPosition(laneX + 16, 48);
-    this.scoreText.setPosition(laneX + laneW - 16, 12);
-    this.infoText.setPosition(laneX + laneW - 16, 48);
-    this.threatText.setPosition(laneX + laneW / 2, 14);
-    if (this.conHud) this.conHud.setPosition(laneX + 16, CON_HUD_Y);
-    if (this.soundBtn) {
-      // left column, directly under the constellation preview
-      const hw = this.soundBtn.displayWidth / 2;
-      const hh = this.soundBtn.displayHeight / 2;
-      this.soundBtn.setPosition(laneX + 16 + hw, CON_HUD_Y + CON_TOP + CON_H + 10 + hh);
+    const compact = this.isCompact();
+
+    // restyle only when the mode changes (re-rendering text every frame is costly)
+    if (this.hudMode !== compact) {
+      this.hudMode = compact;
+      this.livesText.setFontSize(compact ? 20 : 24);
+      this.scoreText.setFontSize(compact ? 22 : 28);
+      this.infoText.setFontSize(compact ? 12 : 16);
+      this.statusText.setFontSize(compact ? 11 : 14);
     }
+    if (this.soundBtn && this.soundBtn.compactMode !== compact) {
+      this.soundBtn.compactMode = compact;
+      this.soundBtn.setFontSize(compact ? 18 : 22);
+    }
+
+    const m = compact ? 10 : 16; // side margin
+    const row1 = compact ? 6 : 12;
+    const row2 = compact ? 38 : 48;
+    this.livesText.setPosition(laneX + m, row1 + (compact ? 2 : 2));
+    this.statusText.setPosition(laneX + m, row2);
+    this.scoreText.setPosition(laneX + laneW - m, row1);
+    this.infoText.setPosition(laneX + laneW - m, row2);
+    if (this.soundBtn) this.soundBtn.setPosition(laneX + laneW / 2, compact ? 20 : 26);
+
+    this.hudBottom = compact ? 58 : 74; // touches above this line never steer the ship
+  }
+    // ---------- responsive helpers ----------
+  uiScale() {
+    return Phaser.Math.Clamp(this.getLane().laneW / LANE_MAX, 0.72, 1);
+  }
+
+  isCompact() {
+    return this.getLane().laneW < 420 || this.scale.height < 480;
+  }
+
+  getShipY() {
+    const { height } = this.scale;
+    return height - Phaser.Math.Clamp(height * 0.14, 64, 110);
   }
 
   addScore(n) {
@@ -442,7 +475,7 @@ export default class GameScene extends Phaser.Scene {
   // ---------- spawning ----------
   // position and velocity come from DifficultyDirector
   spawnAsteroid(x, y, vx = 0, vy = BASE_FALL) {
-    const r = Phaser.Math.Between(18, ASTEROID_SIZE / 2);
+    const r = Math.round(Phaser.Math.Between(14, 34) * this.uiScale());
     const a = this.add.circle(x, y, r, 0x6b5b4b).setDepth(3);
     a.setStrokeStyle(3, 0xb59b86);
     a.hitR = r;
@@ -1240,11 +1273,12 @@ export default class GameScene extends Phaser.Scene {
     else if (this.cursors.right.isDown || this.keys.D.isDown) dir = 1;
 
     const pointer = this.input.activePointer;
-    if (pointer.isDown && !this.muteTapActive) {
+    if (pointer.isDown && !this.muteTapActive && this.steerOk) {
       dir = Phaser.Math.Clamp((pointer.x - this.ship.x) / (boosted ? 20 : 30), -1, 1);
     }
     this.ship.x = Phaser.Math.Clamp(this.ship.x + dir * speed * dt, laneX + 24, laneX + laneW - 24);
     this.ship.rotation = dir * 0.25;
+    this.ship.y = this.getShipY();
     this.updateShipFx(time, dt);
     this.updateNebby(time, dt, laneX);
 
