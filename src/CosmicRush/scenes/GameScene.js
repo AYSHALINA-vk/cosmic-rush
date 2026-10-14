@@ -3,6 +3,7 @@ import { makeNebby, makeStella, makeVoidling, makeCometFox, makeLuma, RAINBOW } 
 import CosmicBackground, { PALETTE } from "./background";
 import DifficultyDirector from "./difficulty";
 import CosmicAudio, { preloadAudio } from "./audio";
+import { pickRandomFact } from "../data/astroFacts";
 import {
   CONSTELLATIONS,
   starById,
@@ -12,8 +13,7 @@ import {
   completedLinks,
 } from "./constellations";
 
-
-const DEBUG_KEYS = false; // set to false after testing (keys 1-4 spawn characters)
+const DEBUG_KEYS = false; // set to true to use keys 1-4 to spawn characters
 
 const LANE_MAX = 480;
 const BEST_KEY = "cosmicRushBestScoreV1";
@@ -54,6 +54,7 @@ const CON_RESPAWN = [6, 9]; // seconds between a collected star and the next tar
 const CON_RETRY = 2.5; // seconds before a missed star is sent again
 const CON_W = 56; // preview drawing area
 const CON_H = 62;
+const CON_HUD_Y = 72; // top of the constellation preview
 const CON_TOP = 18; // preview drawing area starts below the label
 
 const CHAR_CONFIG = {
@@ -66,8 +67,9 @@ const CHAR_CONFIG = {
 // results screen
 const CREW_NAMES = { stella: "Stella", fox: "Comet Fox", luma: "Luma" };
 const PANEL_W = 360;
-const PANEL_H = 520;
+const PANEL_H = 520; // minimum height; the real height grows to fit the fact card
 const MISSION_TITLE = "MISSION FAILED"; // survival game: there is no "win" state, so the run always ends in failure
+const FACT_CARD_W = 300;
 
 const fmtTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
@@ -75,7 +77,8 @@ export default class GameScene extends Phaser.Scene {
   constructor() {
     super("GameScene");
   }
-    preload() {
+
+  preload() {
     preloadAudio(this);
   }
 
@@ -86,7 +89,9 @@ export default class GameScene extends Phaser.Scene {
     this.cameras.main.resetFX();
     this.cameras.main.fadeIn(300, 7, 9, 20);
 
-    this.reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    this.reduceMotion = !!(
+      window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
 
     this.fx = [];
     this.chars = [];
@@ -139,6 +144,7 @@ export default class GameScene extends Phaser.Scene {
 
     // results-screen objects (created lazily in showResults)
     this.panel = null;
+    this.panelH = PANEL_H;
     this.dim = null;
     this.planet = null;
     this.planetShade = null;
@@ -166,7 +172,9 @@ export default class GameScene extends Phaser.Scene {
 
     // --- HUD ---
     this.livesText = this.add.text(0, 14, "♥ ♥ ♥", { fontSize: "24px", color: "#ff5c8a" }).setDepth(10);
-    this.statusText = this.add.text(0, 48, "", { fontSize: "14px", color: "#7df9ff", fontStyle: "bold" }).setDepth(10);
+    this.statusText = this.add
+      .text(0, 48, "", { fontSize: "14px", color: "#7df9ff", fontStyle: "bold" })
+      .setDepth(10);
     this.scoreText = this.add
       .text(0, 12, "0", { fontSize: "28px", color: "#ffffff", fontStyle: "bold" })
       .setOrigin(1, 0)
@@ -205,7 +213,8 @@ export default class GameScene extends Phaser.Scene {
         kb.off("keydown-FOUR", onFour);
       });
     }
-        // --- audio ---
+
+    // --- audio ---
     this.audio = new CosmicAudio(this);
     this.muteTapActive = false;
     this.soundBtn = this.add
@@ -219,7 +228,9 @@ export default class GameScene extends Phaser.Scene {
       this.audio.start();
       this.soundBtn.setText(this.audio.toggleMute() ? "🔇" : "🔊");
     });
-    const onUp = () => (this.muteTapActive = false);
+    const onUp = () => {
+      this.muteTapActive = false;
+    };
     const onM = () => this.soundBtn.setText(this.audio.toggleMute() ? "🔇" : "🔊");
     const startAudio = () => this.audio.start();
     this.input.on("pointerup", onUp);
@@ -236,8 +247,6 @@ export default class GameScene extends Phaser.Scene {
       this.input.keyboard.off("keydown", startAudio);
       this.audio.destroy();
     });
-
-
 
     // dev only: in the browser console, set __cr.t = 0 / 25 / 50 / 75 / 100 / 125 to jump levels
     if (import.meta.env.DEV) window.__cr = this.difficulty;
@@ -340,8 +349,13 @@ export default class GameScene extends Phaser.Scene {
     this.scoreText.setPosition(laneX + laneW - 16, 12);
     this.infoText.setPosition(laneX + laneW - 16, 48);
     this.threatText.setPosition(laneX + laneW / 2, 14);
-    if (this.conHud) this.conHud.setPosition(laneX + 16, 72); // constellation preview, under the status line
-        if (this.soundBtn) this.soundBtn.setPosition(laneX + laneW / 2, 26);
+    if (this.conHud) this.conHud.setPosition(laneX + 16, CON_HUD_Y);
+    if (this.soundBtn) {
+      // left column, directly under the constellation preview
+      const hw = this.soundBtn.displayWidth / 2;
+      const hh = this.soundBtn.displayHeight / 2;
+      this.soundBtn.setPosition(laneX + 16 + hw, CON_HUD_Y + CON_TOP + CON_H + 10 + hh);
+    }
   }
 
   addScore(n) {
@@ -579,7 +593,9 @@ export default class GameScene extends Phaser.Scene {
     }
     // label + next-star marker
     const done = isComplete(def, got);
-    this.conLabel.setText(done ? `${def.name.toUpperCase()} COMPLETE` : `${def.name.toUpperCase()} ${got.length}/${def.stars.length}`);
+    this.conLabel.setText(
+      done ? `${def.name.toUpperCase()} COMPLETE` : `${def.name.toUpperCase()} ${got.length}/${def.stars.length}`
+    );
     this.conLabel.setColor(done ? css(vis.starLit) : "#9fefff");
     const nid = nextStarId(def, got);
     const ns = nid ? starById(def, nid) : null;
@@ -683,7 +699,12 @@ export default class GameScene extends Phaser.Scene {
 
     this.addScore(def.reward.perStar);
     const { laneX, laneW } = this.getLane();
-    this.popText(Phaser.Math.Clamp(x, laneX + 90, laneX + laneW - 90), y, `${star.name.toUpperCase()} +${def.reward.perStar}`, css(def.visuals.starLit));
+    this.popText(
+      Phaser.Math.Clamp(x, laneX + 90, laneX + laneW - 90),
+      y,
+      `${star.name.toUpperCase()} +${def.reward.perStar}`,
+      css(def.visuals.starLit)
+    );
     this.burst(x, y, def.visuals.starLit, 16);
     this.burst(x, y, def.visuals.next, 8);
     this.nebby.pulse = 0.4;
@@ -787,7 +808,7 @@ export default class GameScene extends Phaser.Scene {
     this.isGameOver = true; // update() now returns early: no spawns, no collisions, no damage
     this.audio.sfx("explosion", { gap: 0 });
     this.audio.onGameOver();
-    
+
     this.clearWarnings();
 
     this.burst(this.ship.x, this.ship.y, 0x00e5ff, 24);
@@ -814,6 +835,7 @@ export default class GameScene extends Phaser.Scene {
       stardust: this.stardust,
       collected: { ...this.collected },
       constellations: [...this.conDoneNames],
+      fact: pickRandomFact(), // chosen exactly once per Game Over (endGame is guarded above)
     };
 
     // frozen world + HUD fade out while the collision particles (updateFx keeps running) finish
@@ -852,7 +874,11 @@ export default class GameScene extends Phaser.Scene {
     this.planetShade = this.add.circle(0, 0, 10, PALETTE.pink, 0.12).setDepth(21);
     backdrop.push(this.planet, this.planetShade);
     backdrop.forEach((o) => o.setAlpha(0));
-    this.tweens.add({ targets: backdrop, alpha: this.planetGlow ? { getEnd: (t) => (t === this.planetGlow ? 0.3 : 1) } : 1, duration: fadeMs * 1.4 });
+    this.tweens.add({
+      targets: backdrop,
+      alpha: this.planetGlow ? { getEnd: (t) => (t === this.planetGlow ? 0.3 : 1) } : 1,
+      duration: fadeMs * 1.4,
+    });
 
     const dotColors = [PALETTE.cyan, PALETTE.gold, 0xffffff, PALETTE.violet];
     for (let i = 0; i < 28; i++) {
@@ -876,23 +902,26 @@ export default class GameScene extends Phaser.Scene {
       duration: fadeMs * 1.4,
     });
 
-    // --- panel (designed at PANEL_W x PANEL_H, scaled to fit in layoutResults) ---
+    // --- panel ---
+    // bgG is drawn last, once the final height (which depends on the fact text) is known.
+    // `content` holds everything else: its y=0 is the top of the panel, shifted by 260 so
+    // the original layout coordinates (title at -218, button at 212, ...) still apply.
     const panel = this.add.container(0, 0).setDepth(23).setAlpha(0);
-    const g = this.add.graphics();
-    g.fillStyle(0x0b1030, 0.78);
-    g.fillRoundedRect(-PANEL_W / 2, -PANEL_H / 2, PANEL_W, PANEL_H, 18);
-    g.lineStyle(1.5, PALETTE.cyan, 0.4);
-    g.strokeRoundedRect(-PANEL_W / 2, -PANEL_H / 2, PANEL_W, PANEL_H, 18);
-    g.lineStyle(1, PALETTE.violet, 0.5);
-    g.lineBetween(-140, -12, 140, -12);
-    g.lineBetween(-140, 66, 140, 66);
-    panel.add(g);
+    const bgG = this.add.graphics();
+    const content = this.add.container(0, 0);
+    panel.add([bgG, content]);
+
+    const dividers = this.add.graphics();
+    dividers.lineStyle(1, PALETTE.violet, 0.5);
+    dividers.lineBetween(-140, -12, 140, -12);
+    dividers.lineBetween(-140, 66, 140, 66);
+    content.add(dividers);
 
     const txt = (x, y, s, size, color, bold = false) => {
       const t = this.add
         .text(x, y, s, { fontFamily: FONT, fontSize: `${size}px`, color, fontStyle: bold ? "bold" : "normal" })
         .setOrigin(0.5);
-      panel.add(t);
+      content.add(t);
       return t;
     };
 
@@ -931,7 +960,7 @@ export default class GameScene extends Phaser.Scene {
       kinds.forEach((k, i) => {
         const x = (i - (kinds.length - 1) / 2) * spacing;
         const ch = CHAR_CONFIG[k].make(this).setScale(0.8).setPosition(x, 126);
-        panel.add(ch); // moves it from the scene display list into the panel
+        content.add(ch); // moves it from the scene display list into the panel
         this.resultChars.push(ch);
         txt(x, 160, `${CREW_NAMES[k]} ×${r.collected[k]}`, 11, "#ffffff");
       });
@@ -942,8 +971,50 @@ export default class GameScene extends Phaser.Scene {
       txt(0, 176, `★ ${r.constellations.join(", ").toUpperCase()} COMPLETE`, 10, gold);
     }
 
-    // PLAY AGAIN button
-    const btn = this.add.container(0, 212);
+    // --- COSMIC FACT card (height measured from the text, so nothing can overlap) ---
+    const cardTop = 200;
+    const textW = FACT_CARD_W - 32;
+    const card = this.add.container(0, 0);
+    content.add(card);
+    const cardBg = this.add.graphics();
+    card.add(cardBg);
+    const cardText = (y, s, size, color, bold, wrap) => {
+      const t = this.add
+        .text(0, y, s, {
+          fontFamily: FONT,
+          fontSize: `${size}px`,
+          color,
+          fontStyle: bold ? "bold" : "normal",
+          align: "center",
+          lineSpacing: 3,
+          wordWrap: wrap ? { width: wrap } : undefined,
+        })
+        .setOrigin(0.5, 0);
+      card.add(t);
+      return t;
+    };
+    const factLabel = cardText(cardTop + 12, "COSMIC FACT", 10, cyan, true);
+    factLabel.setShadow(0, 0, cyan, 8, false, true);
+    const factTitle = cardText(cardTop + 38, r.fact.title, 12, "#ffffff", true, textW);
+    const factBody = cardText(factTitle.y + factTitle.height + 8, r.fact.fact, 11, "#b9c6ff", false, textW);
+    const cardH = Math.ceil(factBody.y + factBody.height + 14 - cardTop);
+
+    cardBg.fillStyle(PALETTE.violet, 0.16);
+    cardBg.fillRoundedRect(-FACT_CARD_W / 2, cardTop, FACT_CARD_W, cardH, 12);
+    cardBg.lineStyle(1.5, PALETTE.cyan, 0.45);
+    cardBg.strokeRoundedRect(-FACT_CARD_W / 2, cardTop, FACT_CARD_W, cardH, 12);
+    cardBg.lineStyle(1, PALETTE.cyan, 0.3);
+    cardBg.lineBetween(-50, cardTop + 29, 50, cardTop + 29);
+    cardBg.fillStyle(PALETTE.gold, 0.8);
+    cardBg.fillCircle(-FACT_CARD_W / 2 + 14, cardTop + 18, 1.6);
+    cardBg.fillCircle(FACT_CARD_W / 2 - 14, cardTop + 18, 1.6);
+
+    card.setAlpha(0);
+    this.tweens.add({ targets: card, alpha: 1, duration: fadeMs, delay: rm ? 0 : 900 });
+
+    // PLAY AGAIN button (below the card)
+    const btnY = cardTop + cardH + 38;
+    const btn = this.add.container(0, btnY);
     const bg = this.add.graphics();
     const drawBtn = (hover) => {
       bg.clear();
@@ -959,8 +1030,8 @@ export default class GameScene extends Phaser.Scene {
     label.setShadow(0, 0, cyan, 10, false, true);
     const hit = this.add.rectangle(0, 0, 210, 50, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
     btn.add([bg, label, hit]);
-    panel.add(btn);
-    txt(0, 248, "or press SPACE / ENTER", 10, "#7a86b8");
+    content.add(btn);
+    txt(0, btnY + 36, "or press SPACE / ENTER", 10, "#7a86b8");
 
     hit.on("pointerover", () => {
       drawBtn(true);
@@ -976,6 +1047,15 @@ export default class GameScene extends Phaser.Scene {
     if (!rm) {
       this.tweens.add({ targets: bg, alpha: 0.65, duration: 900, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
     }
+
+    // final panel height: original bottom margin (12px) below the hint text
+    const panelH = Math.max(PANEL_H, btnY + 36 + 12 + 260);
+    this.panelH = panelH;
+    content.setPosition(0, -panelH / 2 + 260);
+    bgG.fillStyle(0x0b1030, 0.78);
+    bgG.fillRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 18);
+    bgG.lineStyle(1.5, PALETTE.cyan, 0.4);
+    bgG.strokeRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 18);
 
     this.panel = panel;
     this.layoutResults(true);
@@ -1021,7 +1101,7 @@ export default class GameScene extends Phaser.Scene {
     if (!this.panel) return;
     const s = this.panel.scaleX;
     const cx = this.panel.x;
-    const cy = this.panel.y - 100 * s;
+    const cy = this.panel.y + (-this.panelH / 2 + 160) * s; // the score sits 160px below the panel top
     const cols = [PALETTE.gold, PALETTE.pink, PALETTE.cyan];
     for (let i = 0; i < 30; i++) {
       const ang = Math.random() * Math.PI * 2;
@@ -1043,7 +1123,8 @@ export default class GameScene extends Phaser.Scene {
 
     if (this.dim) this.dim.setSize(width, height);
 
-    const s = Math.min(1, (width - 16) / PANEL_W, (height - 16) / PANEL_H);
+    // scale the whole panel (including the fact card) down so it always fits the screen
+    const s = Math.min(1, (width - 16) / PANEL_W, (height - 16) / this.panelH);
     if (this.panel) this.panel.setScale(s).setPosition(width / 2, height / 2);
 
     const r = Math.min(width, height) * 0.3;
@@ -1159,14 +1240,9 @@ export default class GameScene extends Phaser.Scene {
     else if (this.cursors.right.isDown || this.keys.D.isDown) dir = 1;
 
     const pointer = this.input.activePointer;
-
-if (pointer.isDown && !this.muteTapActive) {
-  dir = Phaser.Math.Clamp(
-    (pointer.x - this.ship.x) / (boosted ? 20 : 30),
-    -1,
-    1
-  );
-}
+    if (pointer.isDown && !this.muteTapActive) {
+      dir = Phaser.Math.Clamp((pointer.x - this.ship.x) / (boosted ? 20 : 30), -1, 1);
+    }
     this.ship.x = Phaser.Math.Clamp(this.ship.x + dir * speed * dt, laneX + 24, laneX + laneW - 24);
     this.ship.rotation = dir * 0.25;
     this.updateShipFx(time, dt);
