@@ -1158,10 +1158,15 @@ export default class GameScene extends Phaser.Scene {
     if (this.cursors.left.isDown || this.keys.A.isDown) dir = -1;
     else if (this.cursors.right.isDown || this.keys.D.isDown) dir = 1;
 
-    const pointer = (this.input.activePointer.isDown && !this.muteTapActive)
-    if (pointer.isDown && !this.muteTapActive) {
-      dir = Phaser.Math.Clamp((pointer.x - this.ship.x) / (boosted ? 20 : 30), -1, 1);
-    }
+    const pointer = this.input.activePointer;
+
+if (pointer.isDown && !this.muteTapActive) {
+  dir = Phaser.Math.Clamp(
+    (pointer.x - this.ship.x) / (boosted ? 20 : 30),
+    -1,
+    1
+  );
+}
     this.ship.x = Phaser.Math.Clamp(this.ship.x + dir * speed * dt, laneX + 24, laneX + laneW - 24);
     this.ship.rotation = dir * 0.25;
     this.updateShipFx(time, dt);
