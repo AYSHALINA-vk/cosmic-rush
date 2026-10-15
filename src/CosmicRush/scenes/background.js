@@ -2,10 +2,9 @@ import Phaser from "phaser";
 
 const ADD = Phaser.BlendModes.ADD;
 const LANE_MAX = 480;
-const TAU = Math.PI * 2;
 
 export const PALETTE = {
-  space: "#070914",
+  space: "#03040a",
   violet: 0x7651e8,
   cyan: 0x19ddf5,
   pink: 0xff5bc8,
@@ -13,68 +12,33 @@ export const PALETTE = {
   teal: 0x00cfc1,
 };
 
-// ---------------------------------------------------------------------------------------
-// Nebula cloud textures. Each one mixes 2-3 related hues, so a single cloud already has
-// internal colour variation instead of looking like one flat tint.
-// ---------------------------------------------------------------------------------------
-const NEBULA_TEXTURES = [
-  { key: "neb2_violet", colors: [0x7651e8, 0x9a6bff, 0x5b3fd0] },
-  { key: "neb2_indigo", colors: [0x4a4ad8, 0x6a5cff, 0x2f35a8] },
-  { key: "neb2_blue", colors: [0x2c6bff, 0x4aa0ff, 0x1e4fd8] },
-  { key: "neb2_cyan", colors: [0x19ddf5, 0x00cfc1, 0x2c8fff] },
-  { key: "neb2_magenta", colors: [0xff5bc8, 0xd83aa8, 0xb23cff] },
-  { key: "neb2_rose", colors: [0xff7ad9, 0xb06bff, 0xff5bc8] },
+// Everything here sits at negative depth: ships, asteroids, HUD (depth 2+) and the
+// game-over screen (depth 20+) always draw on top.
+const DEPTH = { space: -60, farNeb: -45, midNeb: -40, wisp: -38, nearNeb: -35, dust: -12, streak: -10, vignette: -8 };
+
+// outer = colour of the thin gas, inner = colour of the luminous core
+const NEBULA_DEFS = [
+  { key: "cr_neb_violet", outer: 0x6a18ff, inner: 0xc77dff, seed: 11 },
+  { key: "cr_neb_blue", outer: 0x1038ff, inner: 0x4aa8ff, seed: 23 },
+  { key: "cr_neb_cyan", outer: 0x00a2ff, inner: 0x5ffaff, seed: 37 },
+  { key: "cr_neb_magenta", outer: 0xd810c8, inner: 0xff6ad8, seed: 51 },
+  { key: "cr_neb_indigo", outer: 0x3a1fb0, inner: 0xa085ff, seed: 67 },
+];
+const WISP_DEFS = [
+  { key: "cr_wisp_a", outer: 0x8a4dff, inner: 0xd9a8ff, seed: 83 },
+  { key: "cr_wisp_b", outer: 0x10c0ff, inner: 0xa8f4ff, seed: 97 },
 ];
 
-// ---------------------------------------------------------------------------------------
-// Parallax layers (far -> near). TUNING KNOBS:
-//   size    : rendered cloud diameter in px (random within range)
-//   speed   : drift speed in px/s (far layers crawl, near layers move a little faster)
-//   alpha   : base opacity of each cloud
-//   dir     : range of drift angles in radians (0 = right, PI/2 = down)
-//   breathe : +/- scale breathing amplitude (0.06 = grows/shrinks 6%)
-//   period  : seconds for one breathing cycle
-//   wobble  : px of slow sideways sway added on top of the drift
-// Cloud count per layer = keys.length. Fewer / smaller clouds = cheaper on weak phones.
-// ---------------------------------------------------------------------------------------
+// each layer drifts at its own speed: far = slow & huge, near = faster & smaller (parallax)
 const NEBULA_LAYERS = [
-  {
-    keys: ["neb2_indigo", "neb2_violet", "neb2_blue"],
-    size: [1000, 1400],
-    speed: [3, 6],
-    alpha: [0.42, 0.55],
-    depth: -46,
-    dir: [0, TAU],
-    breathe: [0.05, 0.09],
-    period: [24, 38],
-    wobble: [30, 60],
-    spin: 0.006,
-  },
-  {
-    keys: ["neb2_violet", "neb2_magenta", "neb2_blue"],
-    size: [700, 980],
-    speed: [6, 11],
-    alpha: [0.34, 0.46],
-    depth: -42,
-    dir: [0, TAU],
-    breathe: [0.06, 0.1],
-    period: [18, 30],
-    wobble: [24, 50],
-    spin: 0.01,
-  },
-  {
-    keys: ["neb2_cyan", "neb2_rose", "neb2_magenta"],
-    size: [440, 680],
-    speed: [11, 18],
-    alpha: [0.26, 0.38],
-    depth: -38,
-    dir: [Math.PI * 0.25, Math.PI * 0.75], // near clouds lean downward, like the falling stars
-    breathe: [0.07, 0.12],
-    period: [14, 24],
-    wobble: [16, 36],
-    spin: 0.016,
-  },
+  { kind: "cloud", keys: ["cr_neb_indigo", "cr_neb_blue", "cr_neb_violet"], size: [950, 1350], speed: [3, 6], alpha: 0.78, depth: DEPTH.farNeb, spin: 0.006 },
+  { kind: "cloud", keys: ["cr_neb_magenta", "cr_neb_cyan", "cr_neb_violet"], size: [620, 900], speed: [8, 13], alpha: 0.68, depth: DEPTH.midNeb, spin: 0.01 },
+  { kind: "wisp", keys: ["cr_wisp_a", "cr_wisp_b", "cr_wisp_a"], size: [700, 1000], speed: [6, 11], alpha: 0.5, depth: DEPTH.wisp, spin: -0.02 },
+  { kind: "cloud", keys: ["cr_neb_cyan", "cr_neb_magenta", "cr_neb_blue"], size: [380, 560], speed: [15, 24], alpha: 0.58, depth: DEPTH.nearNeb, spin: 0.015 },
 ];
+
+const LANE_DIM = 0.55; // clouds crossing the play lane are slightly calmer so gameplay stays readable
+const TEX = 256; // nebula texture size (scaled up ~4x: gas is soft, so it stays smooth)
 
 const STAR_COLORS = [0xffffff, 0xffffff, 0xcfe8ff, 0x9fefff, 0xd6c8ff, 0xffd9f0, 0xffe39a];
 const STAR_LAYERS = [
@@ -85,124 +49,115 @@ const STAR_LAYERS = [
 ];
 
 const rgb = (hex) => [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255];
-const wrap01 = (v) => v - Math.floor(v);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const smooth = (t) => t * t * (3 - 2 * t);
 
-// ---- procedural textures (drawn once on an offscreen canvas) ----
-function makeNebulaTexture(scene, def) {
+// ---------- procedural noise (pure maths, no Phaser: easy to test) ----------
+function makeNoise(seed) {
+  const N = 64;
+  let s = seed >>> 0 || 1;
+  const grid = new Float32Array(N * N);
+  for (let i = 0; i < grid.length; i++) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    grid[i] = s / 4294967296;
+  }
+  const val = (x, y) => {
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    const xf = smooth(x - xi);
+    const yf = smooth(y - yi);
+    const x0 = xi & (N - 1);
+    const x1 = (xi + 1) & (N - 1);
+    const y0 = yi & (N - 1);
+    const y1 = (yi + 1) & (N - 1);
+    const top = grid[y0 * N + x0] + (grid[y0 * N + x1] - grid[y0 * N + x0]) * xf;
+    const bot = grid[y1 * N + x0] + (grid[y1 * N + x1] - grid[y1 * N + x0]) * xf;
+    return top + (bot - top) * yf;
+  };
+  // fractal Brownian motion: layered octaves give wispy, gas-like detail
+  return (x, y, oct) => {
+    let sum = 0;
+    let amp = 0.5;
+    let f = 1;
+    let norm = 0;
+    for (let o = 0; o < oct; o++) {
+      sum += amp * val(x * f, y * f);
+      norm += amp;
+      amp *= 0.5;
+      f *= 2;
+    }
+    return sum / norm;
+  };
+}
+
+// Returns RGBA bytes for one nebula sprite: a domain-warped cloud with a hot luminous core
+// ("cloud"), or thin swirling filaments ("wisp").
+export function renderNebulaPixels(size, def, kind) {
+  const fbm = makeNoise(def.seed);
+  const out = new Uint8ClampedArray(size * size * 4);
+  const [or, og, ob] = rgb(def.outer);
+  const [ir, ig, ib] = rgb(def.inner);
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = ((x + 0.5) / size) * 2 - 1;
+      const v = ((y + 0.5) / size) * 2 - 1;
+      const r = Math.hypot(u, v);
+      if (r >= 1) continue;
+      const edge = 1 - smooth(clamp((r - 0.5) / 0.5, 0, 1)); // fades to nothing before the texture edge
+
+      let a;
+      let k; // 0 = outer colour, 1 = inner colour
+      let white = 0;
+      if (kind === "cloud") {
+        const wx = fbm(u * 1.6 + 3.1, v * 1.6 + 7.7, 3);
+        const wy = fbm(u * 1.6 + 9.3, v * 1.6 + 1.9, 3);
+        const n = fbm(u * 2.4 + wx * 1.8, v * 2.4 + wy * 1.8, 5);
+        const dens = clamp((n - 0.3) * 2.4, 0, 1);
+        const core = Math.exp(-r * r * 14);
+        a = Math.min(1, dens * edge * 0.92 + core * 0.4 * edge);
+        k = clamp(dens * 0.6 + core * 0.9, 0, 1);
+        white = core * 0.08;
+      } else {
+        const ang = Math.atan2(v, u) + r * 2.8; // spiral twist
+        const su = Math.cos(ang) * r;
+        const sv = Math.sin(ang) * r;
+        const wx = fbm(su * 2 + 5.2, sv * 2 + 1.3, 3);
+        const n = fbm(su * 3.2 + wx * 1.4, sv * 3.2 + wx * 1.1, 4);
+        const ridge = Math.pow(1 - Math.abs(2 * n - 1), 5);
+        a = clamp(ridge * edge * 0.8, 0, 1);
+        k = clamp(ridge * 1.2, 0, 1);
+        white = ridge * 0.06;
+      }
+
+      const i = (y * size + x) * 4;
+      let R = or + (ir - or) * k;
+      let G = og + (ig - og) * k;
+      let B = ob + (ib - ob) * k;
+      R += (255 - R) * white;
+      G += (255 - G) * white;
+      B += (255 - B) * white;
+      out[i] = R;
+      out[i + 1] = G;
+      out[i + 2] = B;
+      out[i + 3] = a * 255;
+    }
+  }
+  return out;
+}
+
+// ---------- textures (each is drawn once, then only moved/scaled/faded) ----------
+function makeNebulaTexture(scene, def, kind) {
   if (scene.textures.exists(def.key)) return true;
   try {
-    const size = 512;
     const canvas = document.createElement("canvas");
-    canvas.width = size;
-    canvas.height = size;
+    canvas.width = TEX;
+    canvas.height = TEX;
     const ctx = canvas.getContext("2d");
-
-    // 'lighter' accumulates light the way real emission nebulae do
-    ctx.globalCompositeOperation = "lighter";
-    const pick = () => rgb(Phaser.Utils.Array.GetRandom(def.colors));
-
-    // one soft gaussian-ish blob; squash/rot turn it into a stretched wisp of gas
-    const blob = (cx, cy, rad, a, squash = 1, rot = 0) => {
-      const [r, g, b] = pick();
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.rotate(rot);
-      ctx.scale(1, squash);
-      const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, rad);
-      grad.addColorStop(0, `rgba(${r},${g},${b},${a})`);
-      grad.addColorStop(0.3, `rgba(${r},${g},${b},${a * 0.62})`);
-      grad.addColorStop(0.6, `rgba(${r},${g},${b},${a * 0.2})`);
-      grad.addColorStop(0.85, `rgba(${r},${g},${b},${a * 0.05})`);
-      grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-      ctx.fillStyle = grad;
-      ctx.fillRect(-rad, -rad, rad * 2, rad * 2);
-      ctx.restore();
-    };
-
-    const c = size / 2;
-    for (let i = 0; i < 9; i++) {
-      blob(
-        c + Phaser.Math.Between(-110, 110),
-        c + Phaser.Math.Between(-110, 110),
-        Phaser.Math.Between(90, 190),
-        Phaser.Math.FloatBetween(0.16, 0.3)
-      );
-    }
-    for (let i = 0; i < 5; i++) {
-      blob(
-        c + Phaser.Math.Between(-100, 100),
-        c + Phaser.Math.Between(-100, 100),
-        Phaser.Math.Between(120, 220),
-        Phaser.Math.FloatBetween(0.1, 0.2),
-        Phaser.Math.FloatBetween(0.28, 0.4),
-        Math.random() * TAU
-      );
-    }
-    blob(c + Phaser.Math.Between(-40, 40), c + Phaser.Math.Between(-40, 40), 75, 0.3); // luminous core
-
-    // fade everything to zero well before the texture edge: no square outlines, ever
-    ctx.globalCompositeOperation = "destination-in";
-    const mask = ctx.createRadialGradient(c, c, 0, c, c, c);
-    mask.addColorStop(0, "rgba(0,0,0,1)");
-    mask.addColorStop(0.45, "rgba(0,0,0,0.9)");
-    mask.addColorStop(0.7, "rgba(0,0,0,0.35)");
-    mask.addColorStop(0.9, "rgba(0,0,0,0.05)");
-    mask.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = mask;
-    ctx.fillRect(0, 0, size, size);
-
-    // tiny alpha grain: 8-bit gradients on near-black backgrounds otherwise show banding
-    const img = ctx.getImageData(0, 0, size, size);
-    const d = img.data;
-    for (let i = 3; i < d.length; i += 4) {
-      if (d[i] > 0) d[i] = Math.max(0, Math.min(255, d[i] + Math.random() * 6 - 3));
-    }
+    const img = ctx.createImageData(TEX, TEX);
+    img.data.set(renderNebulaPixels(TEX, def, kind));
     ctx.putImageData(img, 0, 0);
-
     scene.textures.addCanvas(def.key, canvas);
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-// deep navy at the top fading to near-black at the bottom
-function makeBaseTexture(scene) {
-  if (scene.textures.exists("bg_base")) return true;
-  try {
-    const canvas = document.createElement("canvas");
-    canvas.width = 4;
-    canvas.height = 256;
-    const ctx = canvas.getContext("2d");
-    const grad = ctx.createLinearGradient(0, 0, 0, 256);
-    grad.addColorStop(0, "#0b1030");
-    grad.addColorStop(0.5, "#070914");
-    grad.addColorStop(1, "#03040a");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 4, 256);
-    scene.textures.addCanvas("bg_base", canvas);
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-// soft horizontal band that keeps the centre play lane calm on wide screens
-function makeLaneShadeTexture(scene) {
-  if (scene.textures.exists("bg_laneshade")) return true;
-  try {
-    const canvas = document.createElement("canvas");
-    canvas.width = 128;
-    canvas.height = 4;
-    const ctx = canvas.getContext("2d");
-    const grad = ctx.createLinearGradient(0, 0, 128, 0);
-    grad.addColorStop(0, "rgba(3,5,14,0)");
-    grad.addColorStop(0.28, "rgba(3,5,14,0.38)");
-    grad.addColorStop(0.72, "rgba(3,5,14,0.38)");
-    grad.addColorStop(1, "rgba(3,5,14,0)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 128, 4);
-    scene.textures.addCanvas("bg_laneshade", canvas);
     return true;
   } catch (e) {
     return false;
@@ -249,23 +204,73 @@ function makeStreakTexture(scene) {
   }
 }
 
+// deep-space base: near-black with a hint of indigo toward the bottom
+function makeSpaceTexture(scene) {
+  if (scene.textures.exists("cr_space")) return true;
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = 4;
+    canvas.height = 256;
+    const ctx = canvas.getContext("2d");
+    const grad = ctx.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0, "#02030a");
+    grad.addColorStop(0.55, "#05071a");
+    grad.addColorStop(1, "#0a0824");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 4, 256);
+    scene.textures.addCanvas("cr_space", canvas);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// dark edges pull the eye to the centre and blend the clouds into black space
+function makeVignetteTexture(scene) {
+  if (scene.textures.exists("cr_vignette")) return true;
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext("2d");
+    const grad = ctx.createRadialGradient(128, 128, 60, 128, 128, 182);
+    grad.addColorStop(0, "rgba(2,3,10,0)");
+    grad.addColorStop(1, "rgba(2,3,10,0.6)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 256, 256);
+    scene.textures.addCanvas("cr_vignette", canvas);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 export default class CosmicBackground {
   constructor(scene) {
     this.scene = scene;
     scene.cameras.main.setBackgroundColor(PALETTE.space);
 
-    this.nebOk = NEBULA_TEXTURES.map((d) => makeNebulaTexture(scene, d)).every(Boolean);
-    this.baseOk = makeBaseTexture(scene);
-    this.shadeOk = makeLaneShadeTexture(scene);
+    this.reduceMotion = !!scene.reduceMotion;
+    this.motion = this.reduceMotion ? 0.3 : 1; // reduced-motion players still get a gentle drift
+    const { width, height } = scene.scale;
+    this.small = Math.min(width, height) < 700; // phones: fewer sprites for steady frame rate
+
+    this.nebOk = NEBULA_DEFS.every((d) => makeNebulaTexture(scene, d, "cloud")) && WISP_DEFS.every((d) => makeNebulaTexture(scene, d, "wisp"));
     this.glowOk = makeGlowTexture(scene);
     this.streakOk = makeStreakTexture(scene);
+    this.spaceOk = makeSpaceTexture(scene);
+    this.vignetteOk = makeVignetteTexture(scene);
 
-    this.createBase();
+    this.createBackdrop();
     this.createNebulae();
     this.createStars();
     this.createDust();
     this.shootTimer = Phaser.Math.Between(1500, 4000);
     this.streaks = [];
+
+    this.onResize = () => this.handleResize();
+    scene.scale.on("resize", this.onResize);
+    scene.events.once("shutdown", () => scene.scale.off("resize", this.onResize));
   }
 
   getLane() {
@@ -274,118 +279,73 @@ export default class CosmicBackground {
     return { laneX: (w - laneW) / 2, laneW, w, wide: w > laneW + 240 };
   }
 
-  // ---------- base + lane shade ----------
-  createBase() {
-    this.base = this.baseOk ? this.scene.add.image(0, 0, "bg_base").setOrigin(0).setDepth(-50) : null;
-    this.shade = this.shadeOk ? this.scene.add.image(0, 0, "bg_laneshade").setDepth(-30) : null;
-    this.dimNow = 1; // cloud opacity multiplier (eases toward 0.72 on narrow screens)
-    this.shadeNow = 0; // lane shade opacity (eases toward 1 on wide screens)
-    this.driftMul = 1; // drift speed multiplier (eases up with difficulty level)
+  // ---------- base + vignette ----------
+  createBackdrop() {
+    const { width, height } = this.scene.scale;
+    if (this.spaceOk) {
+      this.space = this.scene.add.image(0, 0, "cr_space").setOrigin(0).setDisplaySize(width, height).setDepth(DEPTH.space);
+    }
+    if (this.vignetteOk) {
+      this.vignette = this.scene.add.image(0, 0, "cr_vignette").setOrigin(0).setDisplaySize(width, height).setDepth(DEPTH.vignette);
+    }
   }
 
   // ---------- nebulae ----------
-  // Every cloud follows a straight drift on a torus (it leaves one side and re-enters the
-  // opposite side only once it is completely invisible), plus a slow sway, breathing scale,
-  // breathing opacity and a tiny rotation. Nothing is ever reset, so nothing can pop.
   createNebulae() {
+    const { width, height } = this.scene.scale;
     this.nebulae = [];
-    for (const L of NEBULA_LAYERS) {
-      const count = L.keys.length;
-      const keys = Phaser.Utils.Array.Shuffle([...L.keys]);
-      for (let i = 0; i < count; i++) {
-        const key = keys[i];
-        const def = NEBULA_TEXTURES.find((d) => d.key === key);
-        const size = Phaser.Math.FloatBetween(L.size[0], L.size[1]);
+    this.sizeScale = clamp(Math.max(width, height) / 1000, 0.75, 1.3);
 
+    for (const L of NEBULA_LAYERS) {
+      const count = this.small ? Math.max(2, L.keys.length - 1) : L.keys.length;
+      for (let i = 0; i < count; i++) {
+        const key = L.keys[i % L.keys.length];
+        const size = Phaser.Math.Between(L.size[0], L.size[1]) * this.sizeScale;
         let obj;
-        let baseScale;
         if (this.nebOk) {
-          baseScale = size / 512;
-          obj = this.scene.add.image(0, 0, key).setScale(baseScale).setAngle(Phaser.Math.Between(0, 360));
+          obj = this.scene.add.image(0, 0, key).setAngle(Phaser.Math.Between(0, 360));
           obj.setFlipX(Math.random() < 0.5);
         } else {
-          baseScale = 1;
-          obj = this.scene.add.circle(0, 0, size / 4, def.colors[0], 0.05); // fallback
+          obj = this.scene.add.circle(0, 0, size / 4, PALETTE.violet, 0.08); // fallback if textures failed
         }
         obj.setBlendMode(ADD).setDepth(L.depth);
-
-        // spread the drift directions inside a layer so neighbouring clouds never move together
-        const frac = (i + Math.random() * 0.6) / count;
-        const ang = L.dir[0] + (L.dir[1] - L.dir[0]) * frac;
-        const spd = Phaser.Math.FloatBetween(L.speed[0], L.speed[1]);
-        const wob = Phaser.Math.FloatBetween(L.wobble[0], L.wobble[1]);
-        const per = Phaser.Math.FloatBetween(L.period[0], L.period[1]);
-
-        this.nebulae.push({
+        const baseScale = this.nebOk ? size / TEX : 1;
+        obj.setScale(baseScale);
+        const neb = {
           obj,
           half: size / 2,
           baseScale,
-          base: Phaser.Math.FloatBetween(L.alpha[0], L.alpha[1]),
-          u: Math.random(), // position along the wrap span, 0..1 (resize-proof)
-          v: Math.random(),
-          vx: Math.cos(ang) * spd,
-          vy: Math.sin(ang) * spd,
-          ax: wob,
-          ay: wob * Phaser.Math.FloatBetween(0.6, 1),
-          wx: TAU / Phaser.Math.FloatBetween(40, 80),
-          wy: TAU / Phaser.Math.FloatBetween(50, 95),
-          px: Math.random() * TAU,
-          py: Math.random() * TAU,
-          bs: Phaser.Math.FloatBetween(L.breathe[0], L.breathe[1]),
-          bw: TAU / per,
-          bp: Math.random() * TAU,
-          ba: Phaser.Math.FloatBetween(0.12, 0.22),
-          aw: TAU / (per * Phaser.Math.FloatBetween(0.8, 1.2)),
-          ap: Math.random() * TAU,
-          spin: Phaser.Math.FloatBetween(-L.spin, L.spin),
-        });
+          base: L.alpha,
+          lane: 1,
+          vy: Phaser.Math.FloatBetween(L.speed[0], L.speed[1]),
+          vx: Phaser.Math.FloatBetween(-4, 4),
+          spin: L.spin * Phaser.Math.FloatBetween(0.7, 1.3),
+          ph: Math.random() * 6.28,
+          breath: Phaser.Math.FloatBetween(5000, 8500), // ms per breathing cycle
+          x: Phaser.Math.Between(0, width),
+          y: Phaser.Math.Between(-size / 2, height + size / 4),
+        };
+        this.nebulae.push(neb);
       }
     }
   }
 
-  updateNebulae(time, dt, level) {
-    const { width: w, height: h } = this.scene.scale;
-    const { laneW, wide } = this.getLane();
-    const t = time / 1000;
-    const step = Math.min(dt, 0.1); // a stalled tab must not teleport the clouds
-
-    // ease these instead of switching them: no sudden change on level-up or window resize
-    const k = Math.min(1, step * 0.8);
-    this.driftMul += (1 + level * 0.06 - this.driftMul) * k;
-    this.dimNow += ((wide ? 1 : 0.72) - this.dimNow) * k;
-    this.shadeNow += ((wide ? 1 : 0) - this.shadeNow) * k;
-
-    if (this.base) this.base.setDisplaySize(w, h);
-    if (this.shade) {
-      this.shade.setPosition(w / 2, h / 2).setDisplaySize(laneW * 1.3, h).setAlpha(this.shadeNow);
-    }
-
-    for (const n of this.nebulae) {
-      // wrap margin: big enough that the cloud (max breathing + sway) is fully off-screen
-      const m = n.half * 1.2 + Math.max(n.ax, n.ay);
-      const spanX = w + 2 * m;
-      const spanY = h + 2 * m;
-      n.u = wrap01(n.u + (n.vx * this.driftMul * step) / spanX);
-      n.v = wrap01(n.v + (n.vy * this.driftMul * step) / spanY);
-
-      const x = -m + n.u * spanX + Math.sin(t * n.wx + n.px) * n.ax;
-      const y = -m + n.v * spanY + Math.cos(t * n.wy + n.py) * n.ay;
-      const scale = n.baseScale * (1 + n.bs * Math.sin(t * n.bw + n.bp));
-      const alpha = n.base * this.dimNow * (1 + n.ba * Math.sin(t * n.aw + n.ap));
-
-      n.obj.setPosition(x, y);
-      n.obj.setScale(scale);
-      n.obj.setRotation(n.obj.rotation + n.spin * step);
-      n.obj.setAlpha(alpha);
-    }
+  // re-enter from a fresh spot after drifting off the bottom
+  respawnNebula(neb) {
+    const { width } = this.scene.scale;
+    neb.x = Phaser.Math.Between(0, width);
+    neb.y = -neb.half;
   }
 
   // ---------- stars ----------
   createStars() {
     const { width, height } = this.scene.scale;
+    // fewer stars on small screens
+    const density = clamp((width * height) / (1280 * 720), 0.45, 1);
     this.stars = [];
     for (const L of STAR_LAYERS) {
-      for (let i = 0; i < L.count; i++) {
+      const count = Math.round(L.count * density);
+      for (let i = 0; i < count; i++) {
         const color = Phaser.Utils.Array.GetRandom(STAR_COLORS);
         const s = this.scene.add
           .circle(
@@ -418,14 +378,15 @@ export default class CosmicBackground {
     const { width, height } = this.scene.scale;
     this.dust = [];
     const colors = [PALETTE.gold, PALETTE.gold, PALETTE.gold, PALETTE.pink, PALETTE.cyan];
-    for (let i = 0; i < 20; i++) {
+    const count = this.small ? 12 : 20;
+    for (let i = 0; i < count; i++) {
       const color = Phaser.Utils.Array.GetRandom(colors);
       const x = Phaser.Math.Between(0, width);
       const y = Phaser.Math.Between(0, height);
       const d = this.glowOk
         ? this.scene.add.image(x, y, "bg_glow").setTint(color).setScale(Phaser.Math.FloatBetween(0.12, 0.3))
         : this.scene.add.circle(x, y, 2, color);
-      d.setBlendMode(ADD).setDepth(-12);
+      d.setBlendMode(ADD).setDepth(DEPTH.dust);
       d.vy = Phaser.Math.FloatBetween(20, 55);
       d.sway = Phaser.Math.FloatBetween(8, 24);
       d.ph = Math.random() * 6.28;
@@ -461,19 +422,58 @@ export default class CosmicBackground {
     } else {
       objs.push(this.scene.add.rectangle(x, y, 90, 2, color).setRotation(rot));
     }
-    for (const o of objs) o.setBlendMode(ADD).setDepth(-10);
+    for (const o of objs) o.setBlendMode(ADD).setDepth(DEPTH.streak);
     this.streaks.push({ objs, vx, vy, life: 1.1, max: 1.1 });
+  }
+
+  // ---------- resize ----------
+  handleResize() {
+    const { width, height } = this.scene.scale;
+    if (this.space) this.space.setDisplaySize(width, height);
+    if (this.vignette) this.vignette.setDisplaySize(width, height);
+    // anything now outside the new width is respread so the screen is never half-empty
+    for (const s of this.stars) {
+      if (s.x > width) s.x = Phaser.Math.Between(0, width);
+      if (s.y > height) s.y = Phaser.Math.Between(0, height);
+    }
+    for (const d of this.dust) {
+      if (d.baseX > width) d.baseX = Phaser.Math.Between(0, width);
+    }
+    for (const n of this.nebulae) {
+      if (n.x > width) n.x = Phaser.Math.Between(0, width);
+    }
   }
 
   // ---------- update ----------
   update(time, delta, dt, level = 0) {
     const { width, height } = this.scene.scale;
-    const speedMul = 1 + level * 0.12;
+    dt = Math.min(dt, 0.05); // a tab returning from the background must not make clouds jump
+    const m = this.motion;
+    const nebMul = (1 + level * 0.05) * m;
+    const starMul = 1 + level * 0.12;
+    const { laneW } = this.getLane();
+    const laneHalf = laneW / 2;
+    const cx = width / 2;
 
-    this.updateNebulae(time, dt, level);
+    for (const n of this.nebulae) {
+      n.x += n.vx * dt * m;
+      n.y += n.vy * dt * nebMul;
+      if (n.y - n.half > height) this.respawnNebula(n);
+
+      // slow breathing: glow swells and fades, size swells very slightly
+      const b = Math.sin((time / n.breath) * 6.2832 + n.ph);
+      // calmer where a cloud sits over the play lane, full strength on the sides
+      const t = clamp((Math.abs(n.x - cx) - laneHalf * 0.4) / (laneHalf * 0.9), 0, 1);
+      const lane = LANE_DIM + (1 - LANE_DIM) * smooth(t);
+
+      n.obj.setPosition(n.x, n.y);
+      n.obj.setRotation(n.obj.rotation + n.spin * dt * m);
+      n.obj.setScale(n.baseScale * (1 + 0.035 * b));
+      n.obj.setAlpha(n.base * lane * (0.85 + 0.15 * b));
+    }
 
     for (const s of this.stars) {
-      s.y += s.speed * speedMul * dt;
+      s.y += s.speed * starMul * dt;
       if (s.y > height + 4) {
         s.y = -4;
         s.x = Phaser.Math.Between(0, width);
@@ -498,7 +498,7 @@ export default class CosmicBackground {
 
     this.shootTimer -= delta;
     if (this.shootTimer <= 0) {
-      this.spawnShootingStar();
+      if (!this.reduceMotion) this.spawnShootingStar();
       this.shootTimer = Phaser.Math.Between(2500, 6000);
     }
     for (let i = this.streaks.length - 1; i >= 0; i--) {
