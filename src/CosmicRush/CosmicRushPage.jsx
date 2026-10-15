@@ -1,11 +1,12 @@
 import GameCanvas from "./components/GameCanvas";
+import LeaderboardOverlay from "./components/LeaderboardOverlay";
 
 export default function CosmicRushPage() {
   return (
     <div
       style={{
         position: "fixed",
-        inset: 0, // follows the visible viewport as the mobile address bar shows/hides
+        inset: 0,
         background: "#000",
         overflow: "hidden",
         boxSizing: "border-box",
@@ -20,6 +21,7 @@ export default function CosmicRushPage() {
       }}
     >
       <GameCanvas />
+      <LeaderboardOverlay />
     </div>
   );
 }

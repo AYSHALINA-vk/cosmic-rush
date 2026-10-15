@@ -5,8 +5,8 @@ import { SCORPIUS } from "./scorpius";
 import { LEO } from "./leo";
 
 
-// Orion stays first, so the first figure in a run is always the familiar one.
-export const CONSTELLATIONS = [ORION, URSA_MAJOR, URSA_MINOR, CASSIOPEIA, SCORPIUS, LEO, CYGNUS, CRUX];
+
+export const CONSTELLATIONS = [ORION, URSA_MAJOR,  CASSIOPEIA, SCORPIUS, LEO];
 
 export const starById = (def, id) => def.stars.find((s) => s.id === id);
 export const nextStarId = (def, got) => def.order[got.length] ?? null;
@@ -17,13 +17,22 @@ export const completedLinks = (def, got) =>
 
 // Per-run order: Orion first, then every other constellation in a fresh random order,
 // so different runs discover different figures.
+// Remembers which figure opened the previous run, so two runs in a row never start the same way.
+let lastFirstId = null;
+
+// Per-run order: all constellations in a fresh random order.
 export function makeConstellationQueue() {
-  const [first, ...rest] = CONSTELLATIONS;
-  for (let i = rest.length - 1; i > 0; i--) {
+  const q = [...CONSTELLATIONS];
+  for (let i = q.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [rest[i], rest[j]] = [rest[j], rest[i]];
+    [q[i], q[j]] = [q[j], q[i]];
   }
-  return [first, ...rest];
+  if (q.length > 1 && q[0].id === lastFirstId) {
+    const k = 1 + Math.floor(Math.random() * (q.length - 1));
+    [q[0], q[k]] = [q[k], q[0]];
+  }
+  lastFirstId = q[0].id;
+  return q;
 }
 
 // Dev-only sanity check: warns in the console if a definition has a typo.
