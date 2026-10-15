@@ -4,6 +4,7 @@ import CosmicBackground, { PALETTE } from "./background";
 import DifficultyDirector from "./difficulty";
 import CosmicAudio, { preloadAudio } from "./audio";
 import { pickRandomFact } from "../data/astroFacts";
+import { getPlayerName, submitScore, getRankedScores, renamePlayer, MAX_NAME } from "../data/leaderboard";
 import {
   CONSTELLATIONS,
   starById,
@@ -16,8 +17,6 @@ import {
 const DEBUG_KEYS = false; // set to true to use keys 1-4 to spawn characters
 
 const LANE_MAX = 480;
-const BEST_KEY = "cosmicRushBestScoreV1";
-const LEGACY_BEST_KEY = "cosmicRushBest"; // old key: still read so existing records are not lost
 const ADD = Phaser.BlendModes.ADD;
 const FONT = "Orbitron, sans-serif";
 const css = (n) => "#" + n.toString(16).padStart(6, "0");
@@ -54,7 +53,8 @@ const CON_RESPAWN = [6, 9]; // seconds between a collected star and the next tar
 const CON_RETRY = 2.5; // seconds before a missed star is sent again
 const CON_W = 56; // preview drawing area
 const CON_H = 62;
-const CON_HUD_Y = 72; // top of the constellation preview
+const CON_HUD_Y = 72; // top of the constellation preview (regular layout)
+const CON_HUD_Y_COMPACT = 60; // top of the constellation preview (compact layout)
 const CON_TOP = 18; // preview drawing area starts below the label
 
 const CHAR_CONFIG = {
@@ -71,7 +71,254 @@ const PANEL_H = 520; // minimum height; the real height grows to fit the fact ca
 const MISSION_TITLE = "MISSION FAILED"; // survival game: there is no "win" state, so the run always ends in failure
 const FACT_CARD_W = 300;
 
+// leaderboard overlay
+const LB_W = 360;
+const LB_ROW_H = 34;
+const LB_MAX_ROWS = 8;
+const LB_TEX_S = 2; // glass texture is drawn at 2x for crisp edges
+const LB_TEX_PAD = 24; // room around the panel for the outer glow
+const LB_HEADER_DIV = 64; // y of the gradient divider, measured from the panel top
+
 const fmtTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+// ---------- crisp text + shared drawing helpers ----------
+const BODY = "'Segoe UI', system-ui, -apple-system, Roboto, sans-serif"; // readable small text
+const LAVENDER = 0xb48cff;
+const RES_SCORE_Y = 126; // centre of the score, measured from the top of the results panel
+// Canvas text is rasterised once and then scaled. Rendering it at 2-3x keeps it sharp when the panel is scaled.
+const TEXT_RES = Math.min(3, Math.ceil(((typeof window !== "undefined" && window.devicePixelRatio) || 1) * 2));
+
+// every scene.add.text(...) after this renders at TEXT_RES (HUD, pop-ups, results, leaderboard)
+function enableCrispText(scene) {
+  const f = scene.add;
+  if (f.__crisp) return;
+  const orig = f.text.bind(f);
+  f.text = (x, y, s, style) => orig(x, y, s, { resolution: TEXT_RES, ...(style || {}) });
+  f.__crisp = true;
+}
+
+function fitText(t, maxW) {
+  t.setScale(t.width > maxW ? maxW / t.width : 1);
+  return t;
+}
+
+function lerpColor(a, b, t) {
+  const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+  const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+  return (Math.round(ar + (br - ar) * t) << 16) | (Math.round(ag + (bg - ag) * t) << 8) | Math.round(ab + (bb - ab) * t);
+}
+
+function sampleStops(stops, t) {
+  const x = t * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(x));
+  return lerpColor(stops[i], stops[i + 1], x - i);
+}
+
+// outline of a rounded rectangle as a list of points (clockwise, from the top edge)
+function roundedPath(w, h, r) {
+  const pts = [];
+  const line = (x0, y0, x1, y1) => {
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 14));
+    for (let i = 0; i < n; i++) pts.push({ x: x0 + ((x1 - x0) * i) / n, y: y0 + ((y1 - y0) * i) / n });
+  };
+  const arc = (cx, cy, a0) => {
+    for (let i = 0; i < 6; i++) {
+      const a = a0 + (Math.PI / 2) * (i / 6);
+      pts.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+    }
+  };
+  const hw = w / 2;
+  const hh = h / 2;
+  line(-hw + r, -hh, hw - r, -hh);
+  arc(hw - r, -hh + r, -Math.PI / 2);
+  line(hw, -hh + r, hw, hh - r);
+  arc(hw - r, hh - r, 0);
+  line(hw - r, hh, -hw + r, hh);
+  arc(-hw + r, hh - r, Math.PI / 2);
+  line(-hw, hh - r, -hw, -hh + r);
+  arc(-hw + r, -hh + r, Math.PI);
+  return pts;
+}
+
+// multi-colour glowing border (drawn as short coloured segments around the outline), centred on (0,0)
+function gradientBorder(scene, w, h, r, stops, lw) {
+  const pts = roundedPath(w, h, r);
+  const g = scene.add.graphics();
+  const n = pts.length;
+  for (const pass of [{ width: lw * 3.4, alpha: 0.12 }, { width: lw, alpha: 0.95 }]) {
+    for (let i = 0; i < n; i++) {
+      g.lineStyle(pass.width, sampleStops(stops, i / n), pass.alpha);
+      const p = pts[i];
+      const q = pts[(i + 1) % n];
+      g.lineBetween(p.x, p.y, q.x, q.y);
+    }
+  }
+  return { gfx: g, pts };
+}
+
+// elliptical arc (planet rings)
+function ringArc(g, a, b, rot, t0, t1, color, alpha, lw) {
+  g.lineStyle(lw, color, alpha);
+  const steps = 18;
+  let px = 0;
+  let py = 0;
+  for (let i = 0; i <= steps; i++) {
+    const t = t0 + ((t1 - t0) * i) / steps;
+    const x0 = a * Math.cos(t);
+    const y0 = b * Math.sin(t);
+    const x = x0 * Math.cos(rot) - y0 * Math.sin(rot);
+    const y = x0 * Math.sin(rot) + y0 * Math.cos(rot);
+    if (i > 0) g.lineBetween(px, py, x, y);
+    px = x;
+    py = y;
+  }
+}
+
+function planetIcon(scene) {
+  const c = scene.add.container(0, 0);
+  const back = scene.add.graphics();
+  const front = scene.add.graphics();
+  ringArc(back, 25, 7, -0.45, Math.PI, Math.PI * 2, PALETTE.gold, 0.55, 2);
+  const body = scene.add.circle(0, 0, 13, 0x3b2f8f).setStrokeStyle(1.5, LAVENDER, 0.9);
+  const shine = scene.add.circle(-4, -4, 6, 0xffffff, 0.12);
+  ringArc(front, 25, 7, -0.45, 0, Math.PI, PALETTE.gold, 0.95, 2);
+  c.add([back, body, shine, front]);
+  return c;
+}
+
+// small vector icons, roughly 20px square
+function makeIcon(scene, kind, color) {
+  const c = scene.add.container(0, 0);
+  const g = scene.add.graphics();
+  g.lineStyle(2, color, 1);
+  g.fillStyle(color, 1);
+  c.add(g);
+  if (kind === "distance") {
+    g.lineBetween(-7, 1, 0, -6);
+    g.lineBetween(0, -6, 7, 1);
+    g.lineBetween(-7, 9, 0, 2);
+    g.lineBetween(0, 2, 7, 9);
+  } else if (kind === "time") {
+    g.strokeCircle(0, 0, 9);
+    g.lineBetween(0, 0, 0, -5);
+    g.lineBetween(0, 0, 4, 2);
+    g.lineBetween(-2, -12, 2, -12);
+  } else if (kind === "dust") {
+    c.add(scene.add.star(0, 0, 5, 4, 9.5, color));
+  } else if (kind === "trophy") {
+    g.fillTriangle(-8, -9, 8, -9, 6, 2);
+    g.fillTriangle(-8, -9, 6, 2, -6, 2);
+    g.fillRect(-1.5, 2, 3, 6);
+    g.fillRect(-6, 8, 12, 2.5);
+    g.lineStyle(1.8, color, 1);
+    g.strokeCircle(-9, -5, 3.5);
+    g.strokeCircle(9, -5, 3.5);
+  }
+  return c;
+}
+
+// ---------- leaderboard glass texture (drawn once on an offscreen canvas) ----------
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// translucent glass panel: gradient fill, nebula glows, top sheen, divider, gradient neon border
+function makeGlassTexture(scene, key, w, h, divY = LB_HEADER_DIV) {
+  if (scene.textures.exists(key)) return true;
+  try {
+    const S = LB_TEX_S;
+    const P = LB_TEX_PAD;
+    const R = 22;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil((w + P * 2) * S);
+    canvas.height = Math.ceil((h + P * 2) * S);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(S, S);
+    ctx.translate(P, P);
+
+    // soft outer glow
+    ctx.save();
+    roundRectPath(ctx, 0, 0, w, h, R);
+    ctx.shadowColor = "rgba(130,90,255,0.6)";
+    ctx.shadowBlur = 24;
+    ctx.fillStyle = "rgba(8,10,30,0.7)";
+    ctx.fill();
+    ctx.restore();
+
+    // glass body
+    const body = ctx.createLinearGradient(0, 0, w, h);
+    body.addColorStop(0, "rgba(22,32,84,0.80)");
+    body.addColorStop(0.55, "rgba(12,14,46,0.84)");
+    body.addColorStop(1, "rgba(30,14,66,0.82)");
+    roundRectPath(ctx, 0, 0, w, h, R);
+    ctx.fillStyle = body;
+    ctx.fill();
+
+    // everything below is clipped to the panel shape
+    ctx.save();
+    roundRectPath(ctx, 0, 0, w, h, R);
+    ctx.clip();
+
+    const glow = (cx, cy, r, c) => {
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      g.addColorStop(0, c);
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+    };
+    glow(w * 0.88, h * 0.06, w * 0.75, "rgba(150,90,255,0.32)"); // violet nebula, top right
+    glow(w * 0.08, h * 0.96, w * 0.75, "rgba(25,221,245,0.22)"); // cyan nebula, bottom left
+    glow(w * 0.5, h * 0.5, w * 0.55, "rgba(255,91,200,0.07)"); // faint pink core
+
+    // top sheen
+    const sheen = ctx.createLinearGradient(0, 0, 0, h * 0.35);
+    sheen.addColorStop(0, "rgba(255,255,255,0.11)");
+    sheen.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = sheen;
+    ctx.fillRect(0, 0, w, h * 0.35);
+
+    // header divider
+    const div = ctx.createLinearGradient(24, 0, w - 24, 0);
+    div.addColorStop(0, "rgba(25,221,245,0)");
+    div.addColorStop(0.3, "rgba(25,221,245,0.7)");
+    div.addColorStop(0.7, "rgba(150,90,255,0.7)");
+    div.addColorStop(1, "rgba(150,90,255,0)");
+    ctx.fillStyle = div;
+    if (divY !== null) ctx.fillRect(24, divY, w - 48, 1.2);
+    ctx.restore();
+
+    // gradient neon border (with glow)
+    const edge = ctx.createLinearGradient(0, 0, w, h);
+    edge.addColorStop(0, "rgba(25,221,245,0.95)");
+    edge.addColorStop(0.5, "rgba(130,90,255,0.95)");
+    edge.addColorStop(1, "rgba(255,91,200,0.9)");
+    ctx.save();
+    roundRectPath(ctx, 1, 1, w - 2, h - 2, R - 1);
+    ctx.shadowColor = "rgba(25,221,245,0.6)";
+    ctx.shadowBlur = 10;
+    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = edge;
+    ctx.stroke();
+    ctx.restore();
+
+    // inner hairline
+    roundRectPath(ctx, 3.5, 3.5, w - 7, h - 7, R - 3);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(255,255,255,0.07)";
+    ctx.stroke();
+
+    scene.textures.addCanvas(key, canvas);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 export default class GameScene extends Phaser.Scene {
   constructor() {
@@ -84,6 +331,7 @@ export default class GameScene extends Phaser.Scene {
 
   create() {
     const { width, height } = this.scale;
+    enableCrispText(this); // sharper text everywhere (see TEXT_RES)
 
     // a restarted scene must never inherit a half-finished fade
     this.cameras.main.resetFX();
@@ -131,6 +379,8 @@ export default class GameScene extends Phaser.Scene {
     this.asteroids = [];
     this.collectibles = [];
     this.collectTimer = 0;
+    this.hudMode = null; // forces the HUD fonts to be restyled for the new text objects on restart
+    this.hudBottom = 74;
 
     // --- constellation state ---
     this.conIndex = 0;
@@ -153,6 +403,18 @@ export default class GameScene extends Phaser.Scene {
     this.resultChars = [];
     this._rw = 0;
     this._rh = 0;
+    this.resFx = [];
+    this.nebulae = [];
+    this.resT = 0;
+    this.shootT = 0;
+    this.planetRing = null;
+    this.planetMoon = null;
+
+    // leaderboard overlay (created lazily in showLeaderboard)
+    this.lbPanel = null;
+    this.lbDim = null;
+    this.lbH = 0;
+    this.lbStars = [];
 
     this.score = 0;
     this.stardust = 0;
@@ -189,7 +451,7 @@ export default class GameScene extends Phaser.Scene {
         fontSize: "12px",
         color: "#9fefff",
       })
-      .setOrigin(0.5, 0)
+      .setOrigin(1, 0) // right-aligned, third row under the score and distance
       .setDepth(10)
       .setAlpha(0.7);
     this.createConstellationHud(); // must exist before layoutHud positions it
@@ -231,7 +493,9 @@ export default class GameScene extends Phaser.Scene {
     const onUp = () => {
       this.muteTapActive = false;
     };
-        this.steerOk = false;
+
+    // touches that start in the HUD strip never steer the ship
+    this.steerOk = false;
     const onDown = (p) => {
       this.steerOk = p.y > this.hudBottom;
     };
@@ -249,10 +513,10 @@ export default class GameScene extends Phaser.Scene {
     this.events.once("shutdown", () => {
       this.input.off("pointerup", onUp);
       this.input.off("pointerdown", startAudio);
+      this.input.off("pointerdown", onDown);
       this.input.keyboard.off("keydown-M", onM);
       this.input.keyboard.off("keydown", startAudio);
       this.audio.destroy();
-      this.input.off("pointerdown", onDown);
     });
 
     // dev only: in the browser console, set __cr.t = 0 / 25 / 50 / 75 / 100 / 125 to jump levels
@@ -349,35 +613,7 @@ export default class GameScene extends Phaser.Scene {
     return { laneX: (width - laneW) / 2, laneW };
   }
 
-    layoutHud() {
-    const { laneX, laneW } = this.getLane();
-    const compact = this.isCompact();
-
-    // restyle only when the mode changes (re-rendering text every frame is costly)
-    if (this.hudMode !== compact) {
-      this.hudMode = compact;
-      this.livesText.setFontSize(compact ? 20 : 24);
-      this.scoreText.setFontSize(compact ? 22 : 28);
-      this.infoText.setFontSize(compact ? 12 : 16);
-      this.statusText.setFontSize(compact ? 11 : 14);
-    }
-    if (this.soundBtn && this.soundBtn.compactMode !== compact) {
-      this.soundBtn.compactMode = compact;
-      this.soundBtn.setFontSize(compact ? 18 : 22);
-    }
-
-    const m = compact ? 10 : 16; // side margin
-    const row1 = compact ? 6 : 12;
-    const row2 = compact ? 38 : 48;
-    this.livesText.setPosition(laneX + m, row1 + (compact ? 2 : 2));
-    this.statusText.setPosition(laneX + m, row2);
-    this.scoreText.setPosition(laneX + laneW - m, row1);
-    this.infoText.setPosition(laneX + laneW - m, row2);
-    if (this.soundBtn) this.soundBtn.setPosition(laneX + laneW / 2, compact ? 20 : 26);
-
-    this.hudBottom = compact ? 58 : 74; // touches above this line never steer the ship
-  }
-    // ---------- responsive helpers ----------
+  // ---------- responsive helpers ----------
   uiScale() {
     return Phaser.Math.Clamp(this.getLane().laneW / LANE_MAX, 0.72, 1);
   }
@@ -389,6 +625,39 @@ export default class GameScene extends Phaser.Scene {
   getShipY() {
     const { height } = this.scale;
     return height - Phaser.Math.Clamp(height * 0.14, 64, 110);
+  }
+
+  layoutHud() {
+    const { laneX, laneW } = this.getLane();
+    const compact = this.isCompact();
+
+    // restyle only when the mode changes (re-rendering text every frame is costly)
+    if (this.hudMode !== compact) {
+      this.hudMode = compact;
+      this.livesText.setFontSize(compact ? 20 : 24);
+      this.scoreText.setFontSize(compact ? 22 : 28);
+      this.infoText.setFontSize(compact ? 12 : 16);
+      this.statusText.setFontSize(compact ? 11 : 14);
+      this.threatText.setFontSize(compact ? 11 : 12);
+    }
+    if (this.soundBtn && this.soundBtn.compactMode !== compact) {
+      this.soundBtn.compactMode = compact;
+      this.soundBtn.setFontSize(compact ? 18 : 22);
+    }
+
+    const m = compact ? 10 : 16; // side margin
+    const row1 = compact ? 6 : 12;
+    const row2 = compact ? 38 : 48;
+    const row3 = compact ? 53 : 69;
+    this.livesText.setPosition(laneX + m, row1 + 2);
+    this.statusText.setPosition(laneX + m, row2);
+    this.scoreText.setPosition(laneX + laneW - m, row1);
+    this.infoText.setPosition(laneX + laneW - m, row2);
+    this.threatText.setPosition(laneX + laneW - m, row3);
+    if (this.conHud) this.conHud.setPosition(laneX + m, compact ? CON_HUD_Y_COMPACT : CON_HUD_Y);
+    if (this.soundBtn) this.soundBtn.setPosition(laneX + laneW / 2, compact ? 20 : 26);
+
+    this.hudBottom = compact ? 58 : 74; // touches above this line never steer the ship
   }
 
   addScore(n) {
@@ -430,10 +699,11 @@ export default class GameScene extends Phaser.Scene {
   // small glowing banner under the HUD; gameplay is never paused
   showThreatBanner() {
     const { laneX, laneW } = this.getLane();
+    const compact = this.isCompact();
     const t = this.add
-      .text(laneX + laneW / 2, 84, "THREAT LEVEL INCREASED", {
+      .text(laneX + laneW / 2, this.hudBottom + 10, "THREAT LEVEL INCREASED", {
         fontFamily: FONT,
-        fontSize: "16px",
+        fontSize: compact ? "13px" : "16px",
         color: "#ff5bc8",
       })
       .setOrigin(0.5)
@@ -450,32 +720,12 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
-  // highest valid value across the versioned key and the legacy key
-  getBest() {
-    let best = 0;
-    try {
-      for (const key of [BEST_KEY, LEGACY_BEST_KEY]) {
-        const n = Number(localStorage.getItem(key));
-        if (Number.isFinite(n) && n > best) best = Math.floor(n);
-      }
-    } catch (e) {
-      /* storage blocked: treat as no record */
-    }
-    return best;
-  }
-
-  saveBest(score) {
-    try {
-      localStorage.setItem(BEST_KEY, String(Math.floor(score)));
-    } catch (e) {
-      /* ignore */
-    }
-  }
-
   // ---------- spawning ----------
   // position and velocity come from DifficultyDirector
   spawnAsteroid(x, y, vx = 0, vy = BASE_FALL) {
-    const r = Math.round(Phaser.Math.Between(14, 34) * this.uiScale());
+    // same 18..24 radius range as before (diameter <= ASTEROID_SIZE, which the director spaces
+    // its gaps for), only scaled down a little on narrow lanes
+    const r = Math.round(Phaser.Math.Between(18, ASTEROID_SIZE / 2) * this.uiScale());
     const a = this.add.circle(x, y, r, 0x6b5b4b).setDepth(3);
     a.setStrokeStyle(3, 0xb59b86);
     a.hitR = r;
@@ -853,16 +1103,15 @@ export default class GameScene extends Phaser.Scene {
     this.shieldRing.setVisible(false);
     this.statusText.setText("");
 
-    // compare against the PREVIOUS best before saving
-    const prevBest = this.getBest();
-    const isNewBest = this.score > prevBest;
-    if (isNewBest) this.saveBest(this.score);
+    // compares against this player's PREVIOUS best, then saves to the local leaderboard
+    const { prevBest, best, isNewBest } = submitScore(getPlayerName(), this.score);
 
     const result = {
       score: this.score,
       prevBest,
-      best: Math.max(prevBest, this.score),
+      best,
       isNewBest,
+      needed: Math.max(1, best - this.score + 1), // points required to beat the record
       distance: Math.floor(this.distance),
       time: this.elapsed,
       stardust: this.stardust,
@@ -894,9 +1143,32 @@ export default class GameScene extends Phaser.Scene {
     const pink = css(PALETTE.pink);
     const gold = css(PALETTE.gold);
 
-    // --- dim layer, planet, drifting particles ---
-    this.dim = this.add.rectangle(0, 0, width, height, 0x070914, 1).setOrigin(0).setDepth(20).setAlpha(0);
-    this.tweens.add({ targets: this.dim, alpha: 0.82, duration: fadeMs });
+    // never let a missing fact stop the Game Over screen from appearing
+    const fact =
+      r.fact && r.fact.title && r.fact.fact
+        ? r.fact
+        : { title: "Did you know?", fact: "Sunlight takes about 8 minutes to reach Earth." };
+
+    this.resFx = []; // per-frame animation callbacks, run from updateResults
+    this.resT = 0;
+    this.shootT = 1.5;
+
+    // ---------- backdrop: deep-space dim, nebulae, ringed planet, twinkling stars ----------
+    this.dim = this.add.rectangle(0, 0, width, height, 0x050818, 1).setOrigin(0).setDepth(20).setAlpha(0);
+    this.tweens.add({ targets: this.dim, alpha: 0.88, duration: fadeMs });
+
+    this.nebulae = [];
+    if (this.textures.exists("bg_glow")) {
+      [
+        { c: 0x7b2cff, fx: 0.1, fy: 0.14, s: 1.0, a: 0.5 },
+        { c: PALETTE.pink, fx: 0.92, fy: 0.45, s: 0.8, a: 0.3 },
+        { c: 0x2c6bff, fx: 0.06, fy: 0.9, s: 0.8, a: 0.32 },
+        { c: PALETTE.cyan, fx: 0.86, fy: 0.08, s: 0.55, a: 0.24 },
+      ].forEach((d) => {
+        const o = this.add.image(0, 0, "bg_glow").setTint(d.c).setBlendMode(ADD).setDepth(21).setAlpha(0);
+        this.nebulae.push({ o, d });
+      });
+    }
 
     const backdrop = [];
     if (this.textures.exists("bg_glow")) {
@@ -905,203 +1177,430 @@ export default class GameScene extends Phaser.Scene {
     }
     this.planet = this.add.circle(0, 0, 10, PALETTE.violet, 0.45).setStrokeStyle(2, PALETTE.cyan, 0.35).setDepth(21);
     this.planetShade = this.add.circle(0, 0, 10, PALETTE.pink, 0.12).setDepth(21);
-    backdrop.push(this.planet, this.planetShade);
+    this.planetRing = this.add.ellipse(0, 0, 10, 10).setStrokeStyle(2.5, PALETTE.gold, 0.5).setRotation(-0.38).setDepth(21);
+    this.planetMoon = this.add.circle(0, 0, 6, 0xdff6ff, 0.95).setDepth(21);
+    backdrop.push(this.planet, this.planetShade, this.planetRing, this.planetMoon);
     backdrop.forEach((o) => o.setAlpha(0));
     this.tweens.add({
       targets: backdrop,
-      alpha: this.planetGlow ? { getEnd: (t) => (t === this.planetGlow ? 0.3 : 1) } : 1,
+      alpha: { getEnd: (t) => (t === this.planetGlow ? 0.3 : t === this.planetRing ? 0.7 : 1) },
       duration: fadeMs * 1.4,
     });
-
-    const dotColors = [PALETTE.cyan, PALETTE.gold, 0xffffff, PALETTE.violet];
-    for (let i = 0; i < 28; i++) {
-      const d = this.add
-        .circle(
-          Phaser.Math.Between(0, width),
-          Phaser.Math.Between(0, height),
-          Phaser.Math.FloatBetween(1, 2.2),
-          Phaser.Utils.Array.GetRandom(dotColors)
-        )
-        .setBlendMode(ADD)
-        .setDepth(22)
-        .setAlpha(0);
-      d.vy = Phaser.Math.FloatBetween(8, 26);
-      d.base = Phaser.Math.FloatBetween(0.25, 0.7);
-      this.driftDots.push(d);
-    }
-    this.tweens.add({
-      targets: this.driftDots,
-      alpha: { getStart: () => 0, getEnd: (t) => t.base },
-      duration: fadeMs * 1.4,
-    });
-
-    // --- panel ---
-    // bgG is drawn last, once the final height (which depends on the fact text) is known.
-    // `content` holds everything else: its y=0 is the top of the panel, shifted by 260 so
-    // the original layout coordinates (title at -218, button at 212, ...) still apply.
-    const panel = this.add.container(0, 0).setDepth(23).setAlpha(0);
-    const bgG = this.add.graphics();
-    const content = this.add.container(0, 0);
-    panel.add([bgG, content]);
-
-    const dividers = this.add.graphics();
-    dividers.lineStyle(1, PALETTE.violet, 0.5);
-    dividers.lineBetween(-140, -12, 140, -12);
-    dividers.lineBetween(-140, 66, 140, 66);
-    content.add(dividers);
-
-    const txt = (x, y, s, size, color, bold = false) => {
-      const t = this.add
-        .text(x, y, s, { fontFamily: FONT, fontSize: `${size}px`, color, fontStyle: bold ? "bold" : "normal" })
-        .setOrigin(0.5);
-      content.add(t);
-      return t;
-    };
-
-    txt(0, -218, "COSMIC RUSH", 13, cyan).setAlpha(0.85);
-    txt(0, -186, MISSION_TITLE, 26, pink, true).setShadow(0, 0, pink, 14, false, true);
-    txt(0, -138, "FINAL SCORE", 11, "#9bb7ff");
-    const scoreTxt = txt(0, -100, "0", 48, gold, true);
-    scoreTxt.setShadow(0, 0, gold, 10, false, true);
-
-    let badge = null;
-    if (r.isNewBest) {
-      badge = txt(0, -58, "★ NEW PERSONAL BEST! ★", 15, gold, true);
-      badge.setShadow(0, 0, gold, 12, false, true).setAlpha(0);
-      if (r.prevBest > 0) txt(0, -34, `previous best ${r.prevBest.toLocaleString()}`, 10, "#7a86b8");
-    } else {
-      txt(0, -58, `BEST  ${r.best.toLocaleString()}`, 15, "#9bb7ff", true);
-    }
-
-    // stats row
-    [
-      [-115, "DISTANCE", `${r.distance.toLocaleString()} m`, "#ffffff"],
-      [0, "SURVIVED", fmtTime(r.time), "#ffffff"],
-      [115, "STARDUST", `${r.stardust}`, gold],
-    ].forEach(([x, label, value, color]) => {
-      txt(x, 14, label, 10, "#7a86b8");
-      txt(x, 38, value, 18, color, true);
-    });
-
-    // characters collected this run (only those actually collected)
-    txt(0, 86, "CREW COLLECTED", 10, "#7a86b8");
-    const kinds = ["stella", "fox", "luma"].filter((k) => r.collected[k] > 0);
-    if (kinds.length === 0) {
-      txt(0, 128, "none this run", 12, "#7a86b8");
-    } else {
-      const spacing = 100;
-      kinds.forEach((k, i) => {
-        const x = (i - (kinds.length - 1) / 2) * spacing;
-        const ch = CHAR_CONFIG[k].make(this).setScale(0.8).setPosition(x, 126);
-        content.add(ch); // moves it from the scene display list into the panel
-        this.resultChars.push(ch);
-        txt(x, 160, `${CREW_NAMES[k]} ×${r.collected[k]}`, 11, "#ffffff");
+    if (!rm) {
+      this.resFx.push((time) => {
+        if (this._pr === undefined) return;
+        const a = this._pr * 1.55;
+        const b = this._pr * 0.42;
+        const rot = -0.38;
+        const t = time / 2600;
+        const x0 = a * Math.cos(t);
+        const y0 = b * Math.sin(t);
+        this.planetMoon.setPosition(
+          this._pcx + x0 * Math.cos(rot) - y0 * Math.sin(rot),
+          this._pcy + x0 * Math.sin(rot) + y0 * Math.cos(rot)
+        );
       });
     }
 
-    // constellations completed this run (only shown when there is one)
-    if (r.constellations.length > 0) {
-      txt(0, 176, `★ ${r.constellations.join(", ").toUpperCase()} COMPLETE`, 10, gold);
+    const dotColors = [PALETTE.cyan, PALETTE.gold, 0xffffff, PALETTE.violet, PALETTE.pink];
+    for (let i = 0; i < 40; i++) {
+      const x = Phaser.Math.Between(0, width);
+      const y = Phaser.Math.Between(0, height);
+      const col = Phaser.Utils.Array.GetRandom(dotColors);
+      const d =
+        i % 7 === 0
+          ? this.add.star(x, y, 4, 1.1, 4.6, col) // a few four-point sparkles
+          : this.add.circle(x, y, Phaser.Math.FloatBetween(1, 2.2), col);
+      d.setBlendMode(ADD).setDepth(22);
+      d.vy = Phaser.Math.FloatBetween(8, 26);
+      d.base = Phaser.Math.FloatBetween(0.25, 0.75);
+      d.tw = Phaser.Math.Between(600, 1800);
+      d.ph = Math.random() * 6.28;
+      d.setAlpha(rm ? d.base : 0);
+      this.driftDots.push(d);
     }
 
-    // --- COSMIC FACT card (height measured from the text, so nothing can overlap) ---
-    const cardTop = 200;
-    const textW = FACT_CARD_W - 32;
-    const card = this.add.container(0, 0);
-    content.add(card);
-    const cardBg = this.add.graphics();
-    card.add(cardBg);
-    const cardText = (y, s, size, color, bold, wrap) => {
+    // ---------- panel scaffolding ----------
+    const panel = this.add.container(0, 0).setDepth(23).setAlpha(0);
+    const bgHolder = this.add.container(0, 0); // glass body is added once the final height is known
+    const content = this.add.container(0, 0); // y=0 is the top of the panel
+    panel.add([bgHolder, content]);
+
+    const mk = (parent, x, y, s, size, color, o = {}) => {
       const t = this.add
-        .text(0, y, s, {
-          fontFamily: FONT,
+        .text(x, y, s, {
+          fontFamily: o.body ? BODY : FONT,
           fontSize: `${size}px`,
           color,
-          fontStyle: bold ? "bold" : "normal",
-          align: "center",
-          lineSpacing: 3,
-          wordWrap: wrap ? { width: wrap } : undefined,
+          fontStyle: o.bold ? "bold" : "normal",
         })
-        .setOrigin(0.5, 0);
-      card.add(t);
+        .setOrigin(o.ox ?? 0.5, o.oy ?? 0.5);
+      if (o.spacing && t.setLetterSpacing) t.setLetterSpacing(o.spacing);
+      if (o.glow) t.setShadow(0, 0, o.glow, o.blur ?? 10, false, true);
+      parent.add(t);
       return t;
     };
-    const factLabel = cardText(cardTop + 12, "COSMIC FACT", 10, cyan, true);
-    factLabel.setShadow(0, 0, cyan, 8, false, true);
-    const factTitle = cardText(cardTop + 38, r.fact.title, 12, "#ffffff", true, textW);
-    const factBody = cardText(factTitle.y + factTitle.height + 8, r.fact.fact, 11, "#b9c6ff", false, textW);
-    const cardH = Math.ceil(factBody.y + factBody.height + 14 - cardTop);
+    const T = (x, y, s, size, color, o) => mk(content, x, y, s, size, color, o);
 
-    cardBg.fillStyle(PALETTE.violet, 0.16);
-    cardBg.fillRoundedRect(-FACT_CARD_W / 2, cardTop, FACT_CARD_W, cardH, 12);
-    cardBg.lineStyle(1.5, PALETTE.cyan, 0.45);
-    cardBg.strokeRoundedRect(-FACT_CARD_W / 2, cardTop, FACT_CARD_W, cardH, 12);
-    cardBg.lineStyle(1, PALETTE.cyan, 0.3);
-    cardBg.lineBetween(-50, cardTop + 29, 50, cardTop + 29);
-    cardBg.fillStyle(PALETTE.gold, 0.8);
-    cardBg.fillCircle(-FACT_CARD_W / 2 + 14, cardTop + 18, 1.6);
-    cardBg.fillCircle(FACT_CARD_W / 2 - 14, cardTop + 18, 1.6);
-
-    card.setAlpha(0);
-    this.tweens.add({ targets: card, alpha: 1, duration: fadeMs, delay: rm ? 0 : 900 });
-
-    // PLAY AGAIN button (below the card)
-    const btnY = cardTop + cardH + 38;
-    const btn = this.add.container(0, btnY);
-    const bg = this.add.graphics();
-    const drawBtn = (hover) => {
-      bg.clear();
-      bg.fillStyle(PALETTE.cyan, hover ? 0.28 : 0.14);
-      bg.fillRoundedRect(-105, -25, 210, 50, 12);
-      bg.lineStyle(2, PALETTE.cyan, hover ? 1 : 0.7);
-      bg.strokeRoundedRect(-105, -25, 210, 50, 12);
+    const pill = (x, y, w, h, color, text, textColor, size) => {
+      const c = this.add.container(x, y);
+      const g = this.add.graphics();
+      for (let i = 3; i >= 1; i--) {
+        g.lineStyle(i * 2.4, color, 0.07);
+        g.strokeRoundedRect(-w / 2 - i, -h / 2 - i, w + i * 2, h + i * 2, h / 2 + i);
+      }
+      g.fillStyle(color, 0.14);
+      g.fillRoundedRect(-w / 2, -h / 2, w, h, h / 2);
+      g.lineStyle(1.4, color, 0.85);
+      g.strokeRoundedRect(-w / 2, -h / 2, w, h, h / 2);
+      c.add(g);
+      fitText(mk(c, 0, 0, text, size, textColor, { bold: true, glow: css(color), blur: 8, spacing: 1 }), w - 18);
+      content.add(c);
+      return c;
     };
-    drawBtn(false);
-    const label = this.add
-      .text(0, 0, "PLAY AGAIN", { fontFamily: FONT, fontSize: "18px", color: "#e8fdff", fontStyle: "bold" })
-      .setOrigin(0.5);
-    label.setShadow(0, 0, cyan, 10, false, true);
-    const hit = this.add.rectangle(0, 0, 210, 50, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
-    btn.add([bg, label, hit]);
-    content.add(btn);
-    txt(0, btnY + 36, "or press SPACE / ENTER", 10, "#7a86b8");
 
-    hit.on("pointerover", () => {
-      drawBtn(true);
-      this.tweens.add({ targets: btn, scale: 1.05, duration: rm ? 1 : 120 });
+    const reveal = (obj, delay) => {
+      if (rm) return;
+      obj.setAlpha(0);
+      this.tweens.add({ targets: obj, alpha: 1, duration: 420, delay, ease: "Cubic.easeOut" });
+    };
+
+    // ---------- header ----------
+    const brand = T(0, 28, "COSMIC RUSH", 12, cyan, { spacing: 4 }).setAlpha(0.9);
+    const bw = brand.width / 2;
+    const dec = this.add.graphics();
+    dec.lineStyle(1, PALETTE.cyan, 0.5);
+    dec.lineBetween(-bw - 14, 28, -bw - 56, 28);
+    dec.lineBetween(bw + 14, 28, bw + 56, 28);
+    dec.fillStyle(PALETTE.cyan, 0.85);
+    dec.fillCircle(-bw - 8, 28, 2);
+    dec.fillCircle(bw + 8, 28, 2);
+    content.add(dec);
+    fitText(T(0, 58, MISSION_TITLE, 24, pink, { bold: true, glow: pink, blur: 14 }), 300);
+    T(0, 90, "FINAL SCORE", 10, "#9bb7ff", { spacing: 4 });
+
+    // ---------- score: halo, orbit with two moons, golden rays on a new best ----------
+    const SY = RES_SCORE_Y;
+    const haloBase = r.isNewBest ? 0.4 : 0.18;
+    if (this.textures.exists("bg_glow")) {
+      const halo = this.add
+        .image(0, SY, "bg_glow")
+        .setTint(r.isNewBest ? PALETTE.gold : PALETTE.cyan)
+        .setScale(300 / 64)
+        .setBlendMode(ADD)
+        .setAlpha(haloBase);
+      content.add(halo);
+      if (!rm) this.resFx.push((time) => halo.setAlpha(haloBase * (0.8 + 0.2 * Math.sin(time / 500))));
+    }
+    let rays = null;
+    if (r.isNewBest) {
+      rays = this.add.graphics().setBlendMode(ADD).setPosition(0, SY).setAlpha(0);
+      for (let i = 0; i < 14; i++) {
+        const a = (i / 14) * Math.PI * 2;
+        const L = 120;
+        rays.fillStyle(PALETTE.gold, 0.1);
+        rays.fillTriangle(0, 0, Math.cos(a - 0.08) * L, Math.sin(a - 0.08) * L, Math.cos(a + 0.08) * L, Math.sin(a + 0.08) * L);
+      }
+      content.add(rays);
+      if (!rm) this.tweens.add({ targets: rays, rotation: Math.PI * 2, duration: 26000, repeat: -1 });
+    }
+    const orbit = this.add.ellipse(0, SY, 250, 66).setStrokeStyle(1, PALETTE.cyan, 0.3);
+    const dotA = this.add.circle(125, SY, 2.8, 0xffffff, 1).setBlendMode(ADD);
+    const dotB = this.add.circle(-125, SY, 2, PALETTE.gold, 1).setBlendMode(ADD);
+    content.add([orbit, dotA, dotB]);
+    if (!rm) {
+      this.resFx.push((time) => {
+        dotA.setPosition(Math.cos(time / 1400) * 125, SY + Math.sin(time / 1400) * 33);
+        dotB.setPosition(Math.cos(-time / 2300 + 2) * 125, SY + Math.sin(-time / 2300 + 2) * 33);
+      });
+    }
+    const scoreTxt = T(0, SY, "0", 46, gold, { bold: true, glow: gold, blur: 14 });
+    const setScore = (n) => {
+      scoreTxt.setText(n.toLocaleString());
+      fitText(scoreTxt, 270);
+    };
+
+    // ---------- badge / best ----------
+    let badge = null;
+    if (r.isNewBest) {
+      badge = pill(0, 166, 236, 24, PALETTE.gold, "★ NEW PERSONAL BEST ★", gold, 11).setAlpha(0);
+      if (r.prevBest > 0) T(0, 188, `previous best ${r.prevBest.toLocaleString()}`, 10, "#7a86b8", { spacing: 1 });
+    } else {
+      pill(0, 166, 190, 24, LAVENDER, `YOUR BEST  ${r.best.toLocaleString()}`, "#c9d6ff", 12);
+      T(0, 188, `${r.needed.toLocaleString()} MORE POINT${r.needed === 1 ? "" : "S"} TO BEAT IT`, 10, cyan, { spacing: 1 });
+    }
+    let y = 206;
+    if (r.constellations.length > 0) {
+      pill(0, y + 10, 250, 20, PALETTE.gold, `✦ ${r.constellations.join(", ").toUpperCase()} COMPLETE`, gold, 10);
+      y += 28;
+    }
+
+    // ---------- stat tiles ----------
+    const tile = (x, ty, kind, color, labelText, value, valueColor) => {
+      const c = this.add.container(x, ty);
+      const g = this.add.graphics();
+      g.fillStyle(0xffffff, 0.045);
+      g.fillRoundedRect(-50, -26, 100, 52, 10);
+      g.lineStyle(1, color, 0.4);
+      g.strokeRoundedRect(-50, -26, 100, 52, 10);
+      g.fillStyle(color, 0.9);
+      g.fillRoundedRect(-50, -9, 2.5, 18, 1);
+      c.add(g);
+      c.add(makeIcon(this, kind, color).setPosition(-36, -12).setScale(0.62));
+      fitText(mk(c, -26, -12, labelText, 9, "#7a86b8", { ox: 0, spacing: 1 }), 68);
+      fitText(mk(c, 0, 9, value, 16, valueColor, { bold: true }), 88);
+      content.add(c);
+      return c;
+    };
+    const tilesY = y + 8 + 26;
+    [
+      tile(-112, tilesY, "distance", PALETTE.cyan, "DISTANCE", `${r.distance.toLocaleString()} m`, "#ffffff"),
+      tile(0, tilesY, "time", LAVENDER, "SURVIVED", fmtTime(r.time), "#ffffff"),
+      tile(112, tilesY, "dust", PALETTE.gold, "STARDUST", `${r.stardust}`, gold),
+    ].forEach((t, i) => reveal(t, 450 + i * 90));
+    y = tilesY + 26 + 10;
+
+    // ---------- crew strip (compact when nobody was collected) ----------
+    const kinds = ["stella", "fox", "luma"].filter((k) => r.collected[k] > 0);
+    const crewH = kinds.length ? 82 : 34;
+    const crew = this.add.container(0, y);
+    const cg = this.add.graphics();
+    cg.fillStyle(0xffffff, 0.035);
+    cg.fillRoundedRect(-162, 0, 324, crewH, 12);
+    cg.lineStyle(1, LAVENDER, 0.3);
+    cg.strokeRoundedRect(-162, 0, 324, crewH, 12);
+    crew.add(cg);
+    if (kinds.length === 0) {
+      mk(crew, 0, crewH / 2, "NO CREW COLLECTED THIS RUN", 11, "#5d6a9a", { body: true, spacing: 1 });
+    } else {
+      mk(crew, -150, 13, "CREW COLLECTED", 9, "#7a86b8", { ox: 0, spacing: 2 });
+      kinds.forEach((k, i) => {
+        const x = (i - (kinds.length - 1) / 2) * 100;
+        const ch = CHAR_CONFIG[k].make(this).setScale(0.75).setPosition(x, 44);
+        crew.add(ch); // moves it from the scene display list into the panel
+        this.resultChars.push(ch);
+        mk(crew, x, 70, `${CREW_NAMES[k]} ×${r.collected[k]}`, 11, "#ffffff");
+      });
+    }
+    content.add(crew);
+    reveal(crew, 700);
+    y += crewH + 12;
+
+    // ---------- COSMIC FACT card: glowing gradient border, planet icon, travelling light ----------
+    const card = this.add.container(0, y);
+    content.add(card);
+    const tx = -84;
+    const tw = 236;
+    mk(card, tx, 17, "COSMIC FACT", 10, cyan, { ox: 0, bold: true, glow: cyan, spacing: 2 });
+    const ftitle = this.add
+      .text(tx, 31, fact.title, { fontFamily: FONT, fontSize: "12px", color: "#ffffff", fontStyle: "bold", wordWrap: { width: tw }, lineSpacing: 2 })
+      .setOrigin(0, 0);
+    const fbody = this.add
+      .text(tx, ftitle.y + ftitle.height + 6, fact.fact, { fontFamily: BODY, fontSize: "12px", color: "#c9d6ff", wordWrap: { width: tw }, lineSpacing: 3 })
+      .setOrigin(0, 0);
+    card.add([ftitle, fbody]);
+    const cardH = Math.max(86, Math.ceil(fbody.y + fbody.height + 14));
+
+    const frame = this.add.container(0, cardH / 2);
+    const fill = this.add.graphics();
+    fill.fillStyle(0x1a1555, 0.55);
+    fill.fillRoundedRect(-162, -cardH / 2, 324, cardH, 14);
+    frame.add(fill);
+    if (this.textures.exists("bg_glow")) {
+      frame.add(this.add.image(-124, 0, "bg_glow").setTint(0x7b2cff).setScale(150 / 64).setBlendMode(ADD).setAlpha(0.3));
+    }
+    const gb = gradientBorder(this, 324, cardH, 14, [PALETTE.cyan, 0x7b2cff, PALETTE.pink, 0x7b2cff, PALETTE.cyan], 1.8);
+    frame.add(gb.gfx);
+    card.addAt(frame, 0);
+
+    const planet = planetIcon(this).setPosition(-124, cardH / 2);
+    const moon = this.add.circle(-124, cardH / 2, 2.4, 0xdff6ff, 0.95).setBlendMode(ADD);
+    card.add([this.add.circle(-124, cardH / 2, 31).setStrokeStyle(1, PALETTE.cyan, 0.3), planet, moon]);
+    const twinkles = [];
+    for (let i = 0; i < 6; i++) {
+      const s = this.add
+        .star(Phaser.Math.Between(-154, -96), Phaser.Math.Between(10, cardH - 10), 4, 0.8, 3, 0xffffff)
+        .setBlendMode(ADD)
+        .setAlpha(0.35);
+      s.ph = Math.random() * 6.28;
+      twinkles.push(s);
+      card.add(s);
+    }
+    const sparks = [1, 0.5, 0.25].map((a) => this.add.circle(0, 0, 2.6, 0xffffff, a).setBlendMode(ADD));
+    const sparkHalo = this.add.circle(0, 0, 7, 0xffffff, 0.16).setBlendMode(ADD);
+    card.add([sparkHalo, ...sparks]);
+    const np = gb.pts.length;
+    const placeSparks = (time) => {
+      const base = Math.floor(time / 45);
+      sparks.forEach((s, i) => {
+        const p = gb.pts[(((base - i * 2) % np) + np) % np];
+        s.setPosition(p.x, p.y + cardH / 2);
+      });
+      sparkHalo.setPosition(sparks[0].x, sparks[0].y);
+    };
+    placeSparks(0);
+    if (!rm) {
+      this.resFx.push((time) => {
+        placeSparks(time);
+        planet.y = cardH / 2 + Math.sin(time / 700) * 2;
+        planet.rotation = Math.sin(time / 1500) * 0.1;
+        moon.setPosition(-124 + Math.cos(time / 900) * 31, cardH / 2 + Math.sin(time / 900) * 11);
+        twinkles.forEach((s) => s.setAlpha(0.2 + 0.45 * Math.abs(Math.sin(time / 600 + s.ph))));
+      });
+    }
+    reveal(card, 900);
+    y += cardH + 12;
+
+    // ---------- buttons: neon PLAY AGAIN + LEADERBOARD ----------
+    const by = y + 25;
+    const PW = 200;
+    const PH = 50;
+    const play = this.add.container(-62, by);
+    const ph = this.add.graphics();
+    for (let i = 4; i >= 1; i--) {
+      ph.lineStyle(i * 3, PALETTE.cyan, 0.05);
+      ph.strokeRoundedRect(-PW / 2 - i, -PH / 2 - i, PW + i * 2, PH + i * 2, 13 + i);
+    }
+    const pbg = this.add.graphics();
+    const drawPlay = (hover) => {
+      pbg.clear();
+      pbg.fillStyle(PALETTE.cyan, hover ? 0.3 : 0.16);
+      pbg.fillRoundedRect(-PW / 2, -PH / 2, PW, PH, 13);
+      pbg.fillStyle(0xffffff, hover ? 0.08 : 0.04);
+      pbg.fillRoundedRect(-PW / 2 + 3, -PH / 2 + 3, PW - 6, PH * 0.4, 10);
+      pbg.lineStyle(2, PALETTE.cyan, hover ? 1 : 0.8);
+      pbg.strokeRoundedRect(-PW / 2, -PH / 2, PW, PH, 13);
+    };
+    drawPlay(false);
+    const picon = this.add.graphics();
+    picon.fillStyle(PALETTE.cyan, 1);
+    picon.fillTriangle(-80, -8, -80, 8, -67, 0);
+    const plabel = this.add
+      .text(10, 0, "PLAY AGAIN", { fontFamily: FONT, fontSize: "17px", color: "#e8fdff", fontStyle: "bold" })
+      .setOrigin(0.5);
+    plabel.setShadow(0, 0, cyan, 10, false, true);
+    fitText(plabel, 118);
+    const psheen = this.add.rectangle(0, 0, 12, PH - 12, 0xffffff, 1).setAngle(18).setAlpha(0);
+    const phit = this.add.rectangle(0, 0, PW, PH, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
+    play.add([ph, pbg, picon, plabel, psheen, phit]);
+    content.add(play);
+    phit.on("pointerover", () => {
+      drawPlay(true);
+      this.tweens.add({ targets: play, scale: 1.05, duration: rm ? 1 : 120 });
     });
-    hit.on("pointerout", () => {
-      drawBtn(false);
-      this.tweens.add({ targets: btn, scale: 1, duration: rm ? 1 : 120 });
+    phit.on("pointerout", () => {
+      drawPlay(false);
+      this.tweens.add({ targets: play, scale: 1, duration: rm ? 1 : 120 });
     });
-    hit.on("pointerdown", () => {
+    phit.on("pointerdown", () => {
       if (this.resultsReady) this.restartGame();
     });
     if (!rm) {
-      this.tweens.add({ targets: bg, alpha: 0.65, duration: 900, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+      this.tweens.add({ targets: ph, alpha: 0.45, duration: 900, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+      this.resFx.push((time) => {
+        const f = (time / 1900) % 1.7;
+        if (f > 1) {
+          psheen.setAlpha(0);
+        } else {
+          psheen.setAlpha(0.2 * Math.sin(Math.PI * f));
+          psheen.x = -PW / 2 + 24 + f * (PW - 48);
+        }
+      });
     }
 
-    // final panel height: original bottom margin (12px) below the hint text
-    const panelH = Math.max(PANEL_H, btnY + 36 + 12 + 260);
+    const lb = this.add.container(106, by);
+    const lbg = this.add.graphics();
+    const drawLb = (hover) => {
+      lbg.clear();
+      lbg.fillStyle(PALETTE.violet, hover ? 0.34 : 0.18);
+      lbg.fillRoundedRect(-56, -25, 112, 50, 12);
+      lbg.lineStyle(1.5, PALETTE.violet, hover ? 1 : 0.7);
+      lbg.strokeRoundedRect(-56, -25, 112, 50, 12);
+    };
+    drawLb(false);
+    const lbIcon = makeIcon(this, "trophy", PALETTE.gold).setPosition(0, -9).setScale(0.8);
+    const lbLabel = this.add
+      .text(0, 14, "LEADERBOARD", { fontFamily: FONT, fontSize: "9px", color: "#d9c8ff", fontStyle: "bold" })
+      .setOrigin(0.5);
+    fitText(lbLabel, 100);
+    const lbHit = this.add.rectangle(0, 0, 112, 50, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
+    lb.add([lbg, lbIcon, lbLabel, lbHit]);
+    content.add(lb);
+    lbHit.on("pointerover", () => {
+      drawLb(true);
+      this.tweens.add({ targets: lb, scale: 1.05, duration: rm ? 1 : 120 });
+    });
+    lbHit.on("pointerout", () => {
+      drawLb(false);
+      this.tweens.add({ targets: lb, scale: 1, duration: rm ? 1 : 120 });
+    });
+    lbHit.on("pointerdown", () => {
+      if (this.resultsReady) this.showLeaderboard();
+    });
+
+    const hintY = by + PH / 2 + 16;
+    T(0, hintY, "or press SPACE / ENTER", 11, "#7a86b8", { body: true, spacing: 1 });
+
+    // ---------- glass body (sized to the content, so nothing is ever clipped) ----------
+    const panelH = Math.ceil(hintY + 22);
     this.panelH = panelH;
-    content.setPosition(0, -panelH / 2 + 260);
-    bgG.fillStyle(0x0b1030, 0.78);
-    bgG.fillRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 18);
-    bgG.lineStyle(1.5, PALETTE.cyan, 0.4);
-    bgG.strokeRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 18);
+    content.setPosition(0, -panelH / 2);
+    const glassKey = `res_glass_${PANEL_W}x${panelH}`;
+    if (makeGlassTexture(this, glassKey, PANEL_W, panelH, null)) {
+      bgHolder.add(this.add.image(0, 0, glassKey).setScale(1 / LB_TEX_S));
+    } else {
+      const fb = this.add.graphics(); // fallback if canvas textures are unavailable
+      fb.fillStyle(0x0b1030, 0.85);
+      fb.fillRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 20);
+      fb.lineStyle(1.5, PALETTE.cyan, 0.5);
+      fb.strokeRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 20);
+      bgHolder.add(fb);
+    }
+    // tiny stars twinkling inside the glass
+    const glassStars = [];
+    for (let i = 0; i < 14; i++) {
+      const s = this.add
+        .circle(
+          Phaser.Math.Between(-PANEL_W / 2 + 14, PANEL_W / 2 - 14),
+          Phaser.Math.Between(-panelH / 2 + 14, panelH / 2 - 14),
+          Phaser.Math.FloatBetween(0.7, 1.5),
+          Phaser.Utils.Array.GetRandom([0xffffff, PALETTE.cyan, PALETTE.gold])
+        )
+        .setBlendMode(ADD);
+      s.base = Phaser.Math.FloatBetween(0.2, 0.6);
+      s.tw = Phaser.Math.Between(500, 1400);
+      s.ph = Math.random() * 6.28;
+      s.setAlpha(s.base);
+      glassStars.push(s);
+      bgHolder.add(s);
+    }
+    if (!rm) {
+      this.resFx.push((time) => glassStars.forEach((s) => s.setAlpha(s.base * (0.5 + 0.5 * Math.sin(time / s.tw + s.ph)))));
+    }
 
     this.panel = panel;
     this.layoutResults(true);
 
-    // --- entrance ---
+    // ---------- entrance + score reveal ----------
     this.tweens.add({ targets: panel, alpha: 1, duration: fadeMs, delay: rm ? 0 : 350 });
 
     const showFinal = () => {
-      scoreTxt.setText(r.score.toLocaleString());
+      setScore(r.score);
       if (badge) {
         badge.setAlpha(1);
+        if (rays) {
+          if (rm) rays.setAlpha(1);
+          else this.tweens.add({ targets: rays, alpha: 1, duration: 900 });
+        }
         if (!rm) {
-          this.tweens.add({ targets: badge, scale: 1.08, duration: 600, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+          badge.setScale(0.6);
+          this.tweens.add({
+            targets: badge,
+            scale: 1,
+            duration: 420,
+            ease: "Back.easeOut",
+            onComplete: () => this.tweens.add({ targets: badge, scale: 1.05, duration: 700, yoyo: true, repeat: -1, ease: "Sine.easeInOut" }),
+          });
           this.celebrate();
         }
       }
@@ -1115,7 +1614,7 @@ export default class GameScene extends Phaser.Scene {
         duration: 1300,
         delay: 450,
         ease: "Cubic.easeOut",
-        onUpdate: (tw) => scoreTxt.setText(Math.round(tw.getValue()).toLocaleString()),
+        onUpdate: (tw) => setScore(Math.round(tw.getValue())),
         onComplete: showFinal,
       });
     }
@@ -1129,12 +1628,331 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
+  // ---------- leaderboard overlay (local scores) ----------
+  // golden trophy badge for rank #1
+  makeTrophyBadge() {
+    const rm = this.reduceMotion;
+    const c = this.add.container(0, 0);
+    const halo = this.add.circle(0, 0, 17, 0xffd56a, 0.2).setBlendMode(ADD);
+    const disc = this.add.circle(0, 0, 12, 0xffd56a).setStrokeStyle(1.5, 0xfff3b0);
+    const g = this.add.graphics();
+    g.fillStyle(0x3a2a00, 1);
+    g.fillRect(-4.5, -6.5, 9, 4); // cup rim
+    g.fillTriangle(-4.5, -2.5, 4.5, -2.5, 0, 3); // cup body
+    g.fillRect(-0.8, 2.5, 1.6, 3); // stem
+    g.fillRect(-3.5, 5.5, 7, 1.6); // base
+    g.lineStyle(1.2, 0x3a2a00, 1);
+    g.strokeCircle(-5.5, -3.5, 2); // handles
+    g.strokeCircle(5.5, -3.5, 2);
+    c.add([halo, disc, g]);
+    if (!rm) {
+      this.tweens.add({
+        targets: halo,
+        alpha: 0.42,
+        scale: 1.18,
+        duration: 1100,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+    }
+    return c;
+  }
+
+  showLeaderboard() {
+    if (this.lbPanel) return; // already open
+    const rm = this.reduceMotion;
+    const cyan = css(PALETTE.cyan);
+    const gold = css(PALETTE.gold);
+    const me = getPlayerName();
+
+    const all = getRankedScores();
+    const top = all.slice(0, LB_MAX_ROWS);
+    const myIdx = all.findIndex((e) => e.name === me);
+    const extra = myIdx >= LB_MAX_ROWS ? all[myIdx] : null; // my row when I'm outside the top list
+
+    const listH = all.length === 0 ? 60 : top.length * LB_ROW_H + (extra ? 16 + LB_ROW_H : 0);
+    const H = listH + 184;
+    this.lbH = H;
+    const topY = -H / 2;
+    const rowsTop = topY + 102;
+
+    // dim layer: the game stays visible behind it, and it swallows clicks meant for the results screen
+    this.lbDim = this.add
+      .rectangle(0, 0, 4000, 4000, 0x04060f, 0.62)
+      .setDepth(30)
+      .setInteractive();
+
+    // outer container is positioned/scaled by layoutResults; inner one plays the entrance animation
+    const panel = this.add.container(0, 0).setDepth(31);
+    const inner = this.add.container(0, 0);
+    panel.add(inner);
+    this.lbPanel = panel;
+
+    // glass body
+    const texKey = `lb_glass_${LB_W}x${H}`;
+    if (makeGlassTexture(this, texKey, LB_W, H)) {
+      inner.add(this.add.image(0, 0, texKey).setScale(1 / LB_TEX_S));
+    } else {
+      const fb = this.add.graphics(); // fallback if canvas textures are unavailable
+      fb.fillStyle(0x0b1030, 0.9);
+      fb.fillRoundedRect(-LB_W / 2, topY, LB_W, H, 20);
+      fb.lineStyle(2, PALETTE.cyan, 0.7);
+      fb.strokeRoundedRect(-LB_W / 2, topY, LB_W, H, 20);
+      inner.add(fb);
+    }
+
+    // floating stars (behind the content)
+    this.lbStars = [];
+    const starColors = [0xffffff, PALETTE.cyan, PALETTE.gold, PALETTE.violet];
+    for (let i = 0; i < 16; i++) {
+      const s = this.add
+        .circle(
+          Phaser.Math.Between(-LB_W / 2 + 14, LB_W / 2 - 14),
+          Phaser.Math.Between(topY + 12, topY + H - 12),
+          Phaser.Math.FloatBetween(0.8, 1.8),
+          Phaser.Utils.Array.GetRandom(starColors)
+        )
+        .setBlendMode(ADD);
+      s.vy = Phaser.Math.FloatBetween(3, 10);
+      s.minY = topY + 12;
+      s.maxY = topY + H - 12;
+      s.base = Phaser.Math.FloatBetween(0.25, 0.8);
+      s.tw = Phaser.Math.Between(500, 1400);
+      s.ph = Math.random() * 6.28;
+      s.setAlpha(s.base);
+      inner.add(s);
+      this.lbStars.push(s);
+    }
+
+    const mk = (x, y, s, size, color, bold, ox = 0.5, spacing = 0) => {
+      const o = this.add
+        .text(x, y, s, {
+          fontFamily: FONT,
+          fontSize: `${size}px`,
+          color,
+          fontStyle: bold ? "bold" : "normal",
+          letterSpacing: spacing,
+        })
+        .setOrigin(ox, 0.5);
+      inner.add(o);
+      return o;
+    };
+
+    // header
+    const title = mk(0, topY + 36, "LEADERBOARD", 20, "#eafcff", true, 0.5, 4);
+    title.setShadow(0, 0, cyan, 12, false, true);
+
+    // rename link (top-right): lets the player set the name their scores are saved under
+    const rename = mk(LB_W / 2 - 20, topY + 16, "✎ NAME", 9, cyan, true, 1, 1).setPadding(8);
+    rename.setInteractive({ useHandCursor: true });
+    rename.on("pointerdown", () => {
+      const next = window.prompt(`Pilot name (max ${MAX_NAME} characters)`, me);
+      if (next === null) return;
+      if (renamePlayer(me, next)) {
+        this.hideLeaderboard();
+        this.showLeaderboard();
+      }
+    });
+
+    // column headers
+    mk(-128, topY + 84, "RANK", 9, "#7a86b8", false, 0.5, 2);
+    mk(-104, topY + 84, "PILOT", 9, "#7a86b8", false, 0, 2).setX(-100);
+    mk(148, topY + 84, "SCORE", 9, "#7a86b8", false, 1, 2);
+
+    // rows
+    const rowObjs = [];
+    const addRow = (e, y, i) => {
+      const mine = e.name === me;
+      const row = this.add.container(0, y);
+      inner.add(row);
+      rowObjs.push(row);
+
+      if (mine) {
+        const hl = this.add.graphics();
+        hl.lineStyle(5, PALETTE.cyan, 0.12); // soft glow
+        hl.strokeRoundedRect(-158, -16, 316, 32, 11);
+        hl.fillStyle(PALETTE.violet, 0.2);
+        hl.fillRoundedRect(-158, -16, 316, 32, 11);
+        hl.lineStyle(1.4, PALETTE.cyan, 0.95);
+        hl.strokeRoundedRect(-158, -16, 316, 32, 11);
+        row.add(hl);
+      } else if (i < top.length - 1) {
+        const sep = this.add.graphics(); // faint hairline between rows
+        sep.lineStyle(1, 0xffffff, 0.05);
+        sep.lineBetween(-146, LB_ROW_H / 2, 146, LB_ROW_H / 2);
+        row.add(sep);
+      }
+
+      // rank badge
+      if (e.rank === 1) {
+        const tb = this.makeTrophyBadge();
+        tb.setPosition(-128, 0);
+        row.add(tb);
+      } else if (e.rank === 2 || e.rank === 3) {
+        const col = e.rank === 2 ? 0xcfd8ea : 0xd99a6c;
+        const ring = this.add.circle(-128, 0, 11, col, 0.95).setStrokeStyle(1.2, 0xffffff, 0.6);
+        const num = this.add
+          .text(-128, 0, String(e.rank), { fontFamily: FONT, fontSize: "12px", color: "#1a1330", fontStyle: "bold" })
+          .setOrigin(0.5);
+        row.add([ring, num]);
+      } else {
+        const num = this.add
+          .text(-128, 0, String(e.rank), { fontFamily: FONT, fontSize: "12px", color: "#7f8cc0", fontStyle: "bold" })
+          .setOrigin(0.5);
+        row.add(num);
+      }
+
+      // name (+ YOU tag) and score
+      const name = this.add
+        .text(-100, 0, e.name, {
+          fontFamily: FONT,
+          fontSize: "13px",
+          color: mine ? gold : "#ffffff",
+          fontStyle: mine ? "bold" : "normal",
+        })
+        .setOrigin(0, 0.5);
+      // long names shrink to fit so they never run into the score
+      const maxNameW = mine ? 84 : 112;
+      if (name.width > maxNameW) name.setScale(maxNameW / name.width);
+      row.add(name);
+      if (mine) {
+        const px = -100 + name.width * name.scaleX + 8;
+        const pill = this.add.graphics();
+        pill.fillStyle(PALETTE.cyan, 0.2);
+        pill.fillRoundedRect(px, -8, 30, 16, 8);
+        pill.lineStyle(1, PALETTE.cyan, 0.85);
+        pill.strokeRoundedRect(px, -8, 30, 16, 8);
+        const you = this.add
+          .text(px + 15, 0, "YOU", { fontFamily: FONT, fontSize: "8px", color: cyan, fontStyle: "bold" })
+          .setOrigin(0.5);
+        row.add([pill, you]);
+      }
+      const score = this.add
+        .text(148, 0, e.score.toLocaleString(), {
+          fontFamily: FONT,
+          fontSize: "13px",
+          color: mine || e.rank === 1 ? gold : "#ffffff",
+          fontStyle: "bold",
+        })
+        .setOrigin(1, 0.5);
+      if (e.rank === 1) score.setShadow(0, 0, gold, 8, false, true);
+      row.add(score);
+
+      // staggered entrance
+      if (!rm) {
+        row.setAlpha(0);
+        row.x = -14;
+        this.tweens.add({
+          targets: row,
+          alpha: 1,
+          x: 0,
+          duration: 320,
+          delay: 200 + i * 55,
+          ease: "Cubic.easeOut",
+        });
+      }
+    };
+
+    if (all.length === 0) {
+      mk(0, rowsTop + 26, "No scores yet. Play a round!", 12, "#9bb7ff", false);
+    } else {
+      top.forEach((e, i) => addRow(e, rowsTop + LB_ROW_H * i + LB_ROW_H / 2, i));
+      if (extra) {
+        const sepY = rowsTop + LB_ROW_H * top.length + 8;
+        mk(0, sepY, "· · ·", 12, "#7a86b8", false);
+        addRow(extra, sepY + 8 + LB_ROW_H / 2, top.length);
+      }
+    }
+
+    // neon CLOSE button
+    const btnY = rowsTop + listH + 38;
+    const closeBtn = this.add.container(0, btnY);
+    const cg = this.add.graphics();
+    const drawClose = (hover) => {
+      cg.clear();
+      cg.lineStyle(6, PALETTE.cyan, hover ? 0.22 : 0.1); // outer glow
+      cg.strokeRoundedRect(-75, -19, 150, 38, 19);
+      cg.fillStyle(PALETTE.cyan, hover ? 0.24 : 0.1);
+      cg.fillRoundedRect(-75, -19, 150, 38, 19);
+      cg.lineStyle(1.6, PALETTE.cyan, hover ? 1 : 0.8);
+      cg.strokeRoundedRect(-75, -19, 150, 38, 19);
+    };
+    drawClose(false);
+    const closeLabel = this.add
+      .text(0, 0, "CLOSE", {
+        fontFamily: FONT,
+        fontSize: "12px",
+        color: "#d8fbff",
+        fontStyle: "bold",
+        letterSpacing: 3,
+      })
+      .setOrigin(0.5);
+    closeLabel.setShadow(0, 0, cyan, 8, false, true);
+    const closeHit = this.add.rectangle(0, 0, 150, 38, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
+    closeBtn.add([cg, closeLabel, closeHit]);
+    inner.add(closeBtn);
+    closeHit.on("pointerover", () => {
+      drawClose(true);
+      this.tweens.add({ targets: closeBtn, scale: 1.05, duration: rm ? 1 : 120 });
+    });
+    closeHit.on("pointerout", () => {
+      drawClose(false);
+      this.tweens.add({ targets: closeBtn, scale: 1, duration: rm ? 1 : 120 });
+    });
+    closeHit.on("pointerdown", () => this.hideLeaderboard());
+
+    // fade the results screen back so the modal reads clearly, and animate the modal in
+    if (this.panel) {
+      this.tweens.killTweensOf(this.panel);
+      this.tweens.add({ targets: this.panel, alpha: 0.2, duration: rm ? 1 : 220 });
+    }
+    if (!rm) {
+      this.lbDim.setAlpha(0);
+      this.tweens.add({ targets: this.lbDim, alpha: 0.62, duration: 220 });
+      inner.setAlpha(0).setScale(0.93);
+      this.tweens.add({
+        targets: inner,
+        alpha: 1,
+        scale: 1,
+        duration: 320,
+        ease: "Back.easeOut",
+      });
+    }
+    this.layoutResults(true);
+  }
+
+  hideLeaderboard() {
+    // stop every tween on the overlay's objects (rows, trophy halo, buttons) before destroying them,
+    // otherwise endless ones such as the trophy glow keep running after each close
+    const killDeep = (o) => {
+      this.tweens.killTweensOf(o);
+      if (o.list) o.list.forEach(killDeep);
+    };
+    if (this.lbPanel) killDeep(this.lbPanel);
+
+    if (this.lbPanel) {
+      this.lbPanel.destroy();
+      this.lbPanel = null;
+    }
+    if (this.lbDim) {
+      this.tweens.killTweensOf(this.lbDim);
+      this.lbDim.destroy();
+      this.lbDim = null;
+    }
+    this.lbStars = [];
+    if (this.panel) {
+      this.tweens.killTweensOf(this.panel);
+      this.tweens.add({ targets: this.panel, alpha: 1, duration: this.reduceMotion ? 1 : 200 });
+    }
+  }
+
   // gold/pink/cyan burst above the dim layer, around the score
   celebrate() {
     if (!this.panel) return;
     const s = this.panel.scaleX;
     const cx = this.panel.x;
-    const cy = this.panel.y + (-this.panelH / 2 + 160) * s; // the score sits 160px below the panel top
+    const cy = this.panel.y + (-this.panelH / 2 + RES_SCORE_Y) * s;
     const cols = [PALETTE.gold, PALETTE.pink, PALETTE.cyan];
     for (let i = 0; i < 30; i++) {
       const ang = Math.random() * Math.PI * 2;
@@ -1145,6 +1963,27 @@ export default class GameScene extends Phaser.Scene {
         .setDepth(24);
       this.addFx(p, Math.cos(ang) * sp, Math.sin(ang) * sp, Phaser.Math.FloatBetween(0.6, 1.1), { shrink: true });
     }
+    const ring = this.add.circle(cx, cy, 10).setStrokeStyle(3, PALETTE.gold, 1).setDepth(24);
+    this.tweens.add({ targets: ring, scale: 12 * s + 2, alpha: 0, duration: 800, ease: "Cubic.easeOut", onComplete: () => ring.destroy() });
+  }
+
+  // an occasional streak across the sky behind the results panel
+  spawnShootingStar() {
+    const { width, height } = this.scale;
+    const sx = Phaser.Math.Between(Math.round(width * 0.1), Math.round(width * 0.9));
+    const sy = Phaser.Math.Between(0, Math.round(height * 0.35));
+    const ang = Phaser.Math.FloatBetween(0.45, 0.8);
+    const len = Phaser.Math.Between(70, 120);
+    const g = this.add.rectangle(sx, sy, len, 2, 0xbff6ff, 1).setRotation(ang).setBlendMode(ADD).setDepth(22).setAlpha(0.9);
+    this.tweens.add({
+      targets: g,
+      x: sx + Math.cos(ang) * 280,
+      y: sy + Math.sin(ang) * 280,
+      alpha: 0,
+      duration: 750,
+      ease: "Quad.easeIn",
+      onComplete: () => g.destroy(),
+    });
   }
 
   // repositions the results UI; only does work when the viewport size changed
@@ -1156,29 +1995,74 @@ export default class GameScene extends Phaser.Scene {
 
     if (this.dim) this.dim.setSize(width, height);
 
-    // scale the whole panel (including the fact card) down so it always fits the screen
+    // scale the whole panel down only if it would not otherwise fit the screen
     const s = Math.min(1, (width - 16) / PANEL_W, (height - 16) / this.panelH);
     if (this.panel) this.panel.setScale(s).setPosition(width / 2, height / 2);
+
+    // leaderboard overlay (same idea: scale to fit, centered)
+    if (this.lbDim) this.lbDim.setPosition(width / 2, height / 2);
+    if (this.lbPanel) {
+      const ls = Math.min(1, (width - 16) / LB_W, (height - 16) / this.lbH);
+      this.lbPanel.setScale(ls).setPosition(width / 2, height / 2);
+    }
+
+    for (const n of this.nebulae || []) {
+      const d = Math.max(width, height) * n.d.s;
+      n.o.setPosition(width * n.d.fx, height * n.d.fy).setScale(d / 64);
+    }
 
     const r = Math.min(width, height) * 0.3;
     const px = width * 0.82;
     const py = height * 0.88;
+    this._pcx = px;
+    this._pcy = py;
+    this._pr = r;
     if (this.planet) this.planet.setPosition(px, py).setRadius(r);
     if (this.planetShade) this.planetShade.setPosition(px - r * 0.2, py - r * 0.2).setRadius(r * 0.78);
     if (this.planetGlow) this.planetGlow.setPosition(px, py).setScale((r * 3) / 64);
+    if (this.planetRing) this.planetRing.setPosition(px, py).setSize(r * 3.1, r * 0.84);
+    if (this.planetMoon) this.planetMoon.setPosition(px + r * 1.45, py - r * 0.4); // moved along its orbit by resFx
   }
 
   updateResults(time, dt) {
     this.layoutResults();
     for (const ch of this.resultChars) ch.tick(time);
-    if (this.reduceMotion) return;
+    const rm = this.reduceMotion;
+    this.resT = (this.resT || 0) + dt;
+    const fade = rm ? 1 : Math.min(1, this.resT / 1.4);
+
+    // nebula glows fade in, then slowly breathe
+    (this.nebulae || []).forEach((n, i) => {
+      n.o.setAlpha(n.d.a * fade * (rm ? 1 : 0.85 + 0.15 * Math.sin(time / (2600 + i * 700))));
+    });
+    if (rm) return;
     const { width, height } = this.scale;
+
+    for (const f of this.resFx) f(time, dt);
+
+    this.shootT -= dt;
+    if (this.shootT <= 0) {
+      this.shootT = Phaser.Math.FloatBetween(3.5, 7);
+      this.spawnShootingStar();
+    }
+
+    // floating stars inside the leaderboard glass
+    for (const s of this.lbStars) {
+      s.y -= s.vy * dt;
+      if (s.y < s.minY) {
+        s.y = s.maxY;
+        s.x = Phaser.Math.Between(-LB_W / 2 + 14, LB_W / 2 - 14);
+      }
+      s.setAlpha(s.base * (0.6 + 0.4 * Math.sin(time / s.tw + s.ph)));
+    }
+
     for (const d of this.driftDots) {
       d.y -= d.vy * dt;
       if (d.y < -6) {
         d.y = height + 6;
         d.x = Phaser.Math.Between(0, width);
       }
+      d.setAlpha(d.base * (0.65 + 0.35 * Math.sin(time / d.tw + d.ph)) * fade);
     }
   }
 
