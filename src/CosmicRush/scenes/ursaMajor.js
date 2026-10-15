@@ -1,0 +1,33 @@
+export const URSA_MAJOR = {
+  id: "ursa-major",
+  name: "Ursa Major",
+  stars: [
+    { id: "dubhe", name: "Dubhe", x: 0.88, y: 0.14 },
+    { id: "merak", name: "Merak", x: 0.86, y: 0.5 },
+    { id: "phecda", name: "Phecda", x: 0.62, y: 0.64 },
+    { id: "megrez", name: "Megrez", x: 0.6, y: 0.3 },
+    { id: "alioth", name: "Alioth", x: 0.43, y: 0.38 },
+    { id: "mizar", name: "Mizar", x: 0.27, y: 0.46 },
+    { id: "alkaid", name: "Alkaid", x: 0.1, y: 0.74 },
+  ],
+  links: [
+    ["dubhe", "merak"],
+    ["merak", "phecda"],
+    ["phecda", "megrez"],
+    ["megrez", "dubhe"],
+    ["megrez", "alioth"],
+    ["alioth", "mizar"],
+    ["mizar", "alkaid"],
+  ],
+  order: ["dubhe", "merak", "phecda", "megrez", "alioth", "mizar", "alkaid"],
+  reward: { perStar: 50, completion: 1000 },
+  visuals: {
+    guideLine: 0x3b5fd6,
+    litLine: 0xd6e4ff,
+    litGlow: 0x4d7dff,
+    starLit: 0x9ec0ff,
+    starDim: 0x6676b0,
+    next: 0x4d7dff,
+    complete: 0xffd56a,
+  },
+};

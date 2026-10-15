@@ -6,7 +6,7 @@ import CosmicAudio, { preloadAudio } from "./audio";
 import { pickRandomFact } from "../data/astroFacts";
 import { getPlayerName, submitScore, getRankedScores, renamePlayer, MAX_NAME } from "../data/leaderboard";
 import {
-  CONSTELLATIONS,
+  makeConstellationQueue,
   starById,
   nextStarId,
   isNextStar,
@@ -384,7 +384,8 @@ export default class GameScene extends Phaser.Scene {
 
     // --- constellation state ---
     this.conIndex = 0;
-    this.conDef = CONSTELLATIONS[this.conIndex];
+    this.conQueue = makeConstellationQueue(); // Orion first, the rest shuffled per run
+    this.conDef = this.conQueue[this.conIndex];
     this.conGot = []; // star ids collected so far for the current figure
     this.conDone = []; // ids of constellations completed this run
     this.conDoneNames = []; // display names of constellations completed this run
@@ -909,7 +910,7 @@ export default class GameScene extends Phaser.Scene {
 
     let x = null;
     for (let i = 0; i < 8 && x === null; i++) {
-      const cx = Phaser.Math.Between(laneX + 40, laneX + laneW - 40);
+      const cx = Phaser.Math.Between(laneX + 72, laneX + laneW - 72);
       const blocked = this.asteroids.some((a) => a.y < 220 && Math.abs(a.x - cx) < a.hitR + 44);
       if (!blocked && Math.abs(cx - this.ship.x) <= reach) x = cx;
     }
@@ -1019,9 +1020,9 @@ export default class GameScene extends Phaser.Scene {
     this.burst(cx, cy, def.visuals.next, n, 11);
 
     const nextIdx = this.conIndex + 1;
-    if (nextIdx < CONSTELLATIONS.length) {
+    if (nextIdx < this.conQueue.length) {
       this.conIndex = nextIdx;
-      this.conDef = CONSTELLATIONS[nextIdx];
+      this.conDef = this.conQueue[nextIdx];
       this.conGot = [];
       this.conTimer = 5;
       this.time.delayedCall(2500, () => {
