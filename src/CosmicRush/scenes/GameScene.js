@@ -6,6 +6,17 @@ import CosmicAudio, { preloadAudio } from "./audio";
 import { pickRandomFact } from "../data/astroFacts";
 import { getPlayerName, getRankedScores, submitScore } from "../data/leaderboard";
 import {
+  MODES,
+  getMode,
+  setMode,
+  getRank,
+  recordRun,
+  submitSupernovaScore,
+  getSupernovaRanked,
+} from "../data/progress";
+
+import ProgressPanel from "./progressPanel";
+import {
   CONSTELLATIONS,
   starById,
   nextStarId,
@@ -42,6 +53,8 @@ const BOOST_SECONDS = 6;
 const SHIELD_SECONDS = 12;
 const STELLA_POINTS = 250;
 const WARNING_SECONDS = 1.4;
+// Supernova mode: a harder run with its own high scores
+const SUPERNOVA = { lives: 2, clock: 1.35, startT: 25, fall: 1.2 };
 
 // asteroid tuning (difficulty.js multiplies BASE_FALL per level)
 const BASE_FALL = 220; // level-1 asteroid fall speed (px/s)
@@ -271,6 +284,8 @@ export default class GameScene extends Phaser.Scene {
     this.warnings = [];
 
     this.bg = new CosmicBackground(this);
+    this.mode = getMode();
+    this.supernova = this.mode === "supernova";
 
     // --- ship + effects ---
     this.glow = this.add.circle(width / 2, height - 90, 34, 0x00e5ff, 0.14).setBlendMode(ADD).setDepth(4);
@@ -280,6 +295,9 @@ export default class GameScene extends Phaser.Scene {
     this.ship.setStrokeStyle(2, 0xffffff);
     this.shipRadius = 16;
     this.trailTimer = 0;
+    this.shipColor = getRank().color; // unlocked through Galactic Rank
+    this.ship.setFillStyle(this.shipColor);
+    this.glow.setFillStyle(this.shipColor, 0.14);
 
     // --- Nebby follows the ship (no collisions) ---
     this.nebby = makeNebby(this).setDepth(4);
@@ -291,10 +309,12 @@ export default class GameScene extends Phaser.Scene {
 
     // --- controls ---
     this.cursors = this.input.keyboard.createCursorKeys();
-    this.keys = this.input.keyboard.addKeys("A,D,SPACE,ENTER");
-
+    this.keys = this.input.keyboard.addKeys("A,D,SPACE,ENTER,N");
     // --- game state (everything here is rebuilt on every restart) ---
-    this.lives = 3;
+    this.lives = this.supernova ? SUPERNOVA.lives : 3;
+    this.lastHitAt = 0; // for the "no hit" streak
+    this.noHitBest = 0;
+    this.runConStars = 0;
     this.invulnUntil = 0;
     this.boostUntil = 0;
     this.shieldUntil = 0;
@@ -327,6 +347,7 @@ export default class GameScene extends Phaser.Scene {
     this.planetGlow = null;
     this.planetRing = null;
     this.borderComet = null;
+    this.modeRowRefresh = null;
     this.resultOrbit = null;
     this.driftDots = [];
     this.resultChars = [];
@@ -350,13 +371,17 @@ export default class GameScene extends Phaser.Scene {
 
     // fresh difficulty director on every (re)start
     this.difficulty = new DifficultyDirector();
+    // Supernova begins at Threat 2 (assumes the director's clock is the numeric property `t`)
+    if (this.supernova && typeof this.difficulty.t === "number") this.difficulty.t = SUPERNOVA.startT;
     this.shownLevel = 1;
 
     this.next = {};
     for (const k of Object.keys(SCHEDULE)) this.next[k] = SCHEDULE[k][0];
 
     // --- HUD ---
-    this.livesText = this.add.text(0, 14, "♥ ♥ ♥", { fontSize: "24px", color: "#ff5c8a" }).setDepth(10);
+    this.livesText = this.add
+      .text(0, 14, Array(this.lives).fill("♥").join(" "), { fontSize: "24px", color: "#ff5c8a" })
+      .setDepth(10);
     this.statusText = this.add
       .text(0, 48, "", { fontSize: "14px", color: "#7df9ff", fontStyle: "bold" })
       .setDepth(10);
@@ -369,14 +394,18 @@ export default class GameScene extends Phaser.Scene {
       .setOrigin(1, 0)
       .setDepth(10);
     this.threatText = this.add
-      .text(0, 14, "THREAT LEVEL 1", {
+    
+     .text(0, 14, this.threatLabel(1), {
+      
         fontFamily: FONT,
         fontSize: "12px",
         color: "#9fefff",
       })
+      
       .setOrigin(1, 0) // right-aligned, third row under the score and distance
       .setDepth(10)
       .setAlpha(0.7);
+      if (this.supernova) this.threatText.setColor("#ff5bc8");
     this.createConstellationHud(); // must exist before layoutHud positions it
     this.layoutHud();
 
@@ -440,6 +469,12 @@ export default class GameScene extends Phaser.Scene {
       this.input.keyboard.off("keydown-M", onM);
       this.input.keyboard.off("keydown", startAudio);
       this.audio.destroy();
+    });
+
+    this.progressUi = new ProgressPanel(this, {
+      glass: (key, w, h) => makeGlassTexture(this, key, w, h, false),
+      glassScale: 1 / LB_TEX_S,
+      onMode: () => this.modeRowRefresh && this.modeRowRefresh(),
     });
 
     // dev only: in the browser console, set __cr.t = 0 / 25 / 50 / 75 / 100 / 125 to jump levels
@@ -919,6 +954,7 @@ export default class GameScene extends Phaser.Scene {
     const { x, y } = c;
     const star = starById(def, c.starId);
     this.conGot.push(c.starId);
+    this.runConStars += 1;
     this.removeConStar();
     this.conTimer = Phaser.Math.FloatBetween(CON_RESPAWN[0], CON_RESPAWN[1]);
 
@@ -985,6 +1021,8 @@ export default class GameScene extends Phaser.Scene {
       this.popText(this.ship.x, this.ship.y - 52, "Shield blocked!", "#ffffff");
       return;
     }
+    this.noHitBest = Math.max(this.noHitBest, this.elapsed - this.lastHitAt);
+    this.lastHitAt = this.elapsed;
 
     this.lives -= 1;
     this.livesText.setText(Array(Math.max(this.lives, 0)).fill("♥").join(" "));
@@ -1047,9 +1085,28 @@ export default class GameScene extends Phaser.Scene {
     this.statusText.setText("");
 
     // compares against this player's PREVIOUS best, then saves to the local leaderboard
-    const { prevBest, best, isNewBest } = submitScore(getPlayerName(), this.score);
+        // saves to the matching local board: the classic leaderboard or the separate Supernova one
+    const name = getPlayerName();
+    const { prevBest, best, isNewBest } = this.supernova
+      ? submitSupernovaScore(name, this.score)
+      : submitScore(name, this.score);
+
+    // ranks, daily missions, badges and lifetime stats (all local)
+    const progress = recordRun({
+      mode: this.mode,
+      score: this.score,
+      survival: this.elapsed,
+      distance: Math.floor(this.distance),
+      stardust: this.stardust,
+      crew: { ...this.collected },
+      constellationIds: [...this.conDone],
+      conStars: this.runConStars,
+      noHit: Math.floor(this.noHitBest),
+      threat: this.difficulty.level,
+    });
 
     const result = {
+      mode: this.mode,
       score: this.score,
       prevBest,
       best,
@@ -1062,6 +1119,7 @@ export default class GameScene extends Phaser.Scene {
       collected: { ...this.collected },
       constellations: [...this.conDoneNames],
       fact: pickRandomFact(), // chosen exactly once per Game Over (endGame is guarded above)
+      progress,
     };
 
     // frozen world + HUD fade out while the collision particles (updateFx keeps running) finish
@@ -1078,6 +1136,65 @@ export default class GameScene extends Phaser.Scene {
     // scene clock timers are cleared automatically when the scene shuts down
     this.time.delayedCall(this.reduceMotion ? 50 : 750, () => this.showResults(result));
   }
+    threatLabel(n) {
+    return this.supernova ? `SUPERNOVA · THREAT ${n}` : `THREAT LEVEL ${n}`;
+  }
+
+  buildToasts(P) {
+    const out = [];
+    const gold = PALETTE.gold;
+    if (P.rankedUp) {
+      out.push({ msg: `RANK UP  ·  ${P.rankInfo.rank.name}`, sub: "NEW SHIP COLOUR UNLOCKED", col: P.rankInfo.rank.color });
+    }
+    for (const c of P.challenges) {
+      if (c.justCompleted) out.push({ msg: "MISSION COMPLETE", sub: `${c.text}  ·  +${c.reward} XP`, col: 0x7dffb0 });
+    }
+    if (P.streakBonus > 0) out.push({ msg: `${P.streak}-DAY STREAK`, sub: `+${P.streakBonus} XP`, col: gold });
+    if (P.sweepNow) out.push({ msg: "DAILY SWEEP", sub: `ALL MISSIONS DONE  ·  +${P.sweepXp} XP`, col: gold });
+    for (const b of P.newBadges) out.push({ msg: `${b.icon}  BADGE UNLOCKED`, sub: b.name.toUpperCase(), col: gold });
+    return out;
+  }
+
+  queueToasts(list, startMs) {
+    list.slice(0, 6).forEach((t, i) => {
+      this.time.delayedCall(startMs + i * 1700, () => this.resultToast(t));
+    });
+  }
+
+  // reward banner above the results screen; gameplay is already over, nothing is paused
+  resultToast(t) {
+    if (!this.panel) return;
+    const { width, height } = this.scale;
+    const color = css(t.col);
+    const c = this.add.container(width / 2, Math.max(54, height * 0.1)).setDepth(40).setAlpha(0);
+    const msg = this.add
+      .text(0, -9, t.msg, { fontFamily: FONT, fontSize: "14px", color, fontStyle: "bold" })
+      .setOrigin(0.5);
+    const sub = this.add
+      .text(0, 11, t.sub || "", {
+        fontFamily: FONT,
+        fontSize: "10px",
+        color: "#cfe3ff",
+        align: "center",
+        wordWrap: { width: Math.min(300, width - 40) },
+      })
+      .setOrigin(0.5);
+    const w = Math.min(Math.max(msg.width, sub.width) + 40, width - 16);
+    const bg = this.add.graphics();
+    bg.fillStyle(0x070914, 0.94);
+    bg.fillRoundedRect(-w / 2, -26, w, 52, 14);
+    bg.lineStyle(1.5, t.col, 0.9);
+    bg.strokeRoundedRect(-w / 2, -26, w, 52, 14);
+    c.add([bg, msg, sub]);
+    this.tweens.add({
+      targets: c,
+      alpha: 1,
+      duration: 280,
+      hold: 1300,
+      yoyo: true,
+      onComplete: () => c.destroy(),
+    });
+  }
 
   showResults(r) {
     const { width, height } = this.scale;
@@ -1086,6 +1203,8 @@ export default class GameScene extends Phaser.Scene {
     const cyan = css(PALETTE.cyan);
     const pink = css(PALETTE.pink);
     const gold = css(PALETTE.gold);
+    const sn = r.mode === "supernova";
+    const P = r.progress;
 
     // --- dim layer (lighter so the living background shows through), planet + ring, drifting particles ---
     this.dim = this.add.rectangle(0, 0, width, height, 0x070914, 1).setOrigin(0).setDepth(20).setAlpha(0);
@@ -1181,7 +1300,13 @@ export default class GameScene extends Phaser.Scene {
     const ghostB = txt(0, -186, MISSION_TITLE, 26, css(PALETTE.violet), true).setBlendMode(ADD).setAlpha(0);
     const title = txt(0, -186, MISSION_TITLE, 26, pink, true);
     title.setShadow(0, 0, pink, 14, false, true);
-    const sub = txt(0, -162, r.threat ? `REACHED THREAT LEVEL ${r.threat}` : "RUN COMPLETE", 10, cyan);
+    const sub = txt(
+      0,
+      -162,
+      `${sn ? "SUPERNOVA  ·  " : ""}${r.threat ? `REACHED THREAT LEVEL ${r.threat}` : "RUN COMPLETE"}`,
+      10,
+      sn ? pink : cyan
+    );
     if (!rm) {
       title.setAlpha(0).setScale(1.12);
       sub.setAlpha(0);
@@ -1267,8 +1392,65 @@ export default class GameScene extends Phaser.Scene {
       revealUp([txt(0, 176, `★ ${r.constellations.join(", ").toUpperCase()} COMPLETE`, 10, gold)], 1200);
     }
 
+    // --- Galactic Rank progress (real local data) ---
+    if (P) {
+      const info = P.rankInfo;
+      const rc = css(info.rank.color);
+      const rankLine = txt(0, 198, `${info.rank.name}  ·  +${P.xpGained.toLocaleString()} XP`, 11, rc, true);
+      rankLine.setShadow(0, 0, rc, 8, false, true);
+      const barBg = this.add.graphics();
+      barBg.fillStyle(0xffffff, 0.1);
+      barBg.fillRoundedRect(-130, 211, 260, 7, 3.5);
+      content.add(barBg);
+      const barFill = this.add.graphics();
+      content.add(barFill);
+      const toPct = info.next ? info.pct : 1;
+      const fromPct = P.rankedUp ? 0 : P.pctBefore;
+      const drawBar = (pct) => {
+        barFill.clear();
+        const w = Math.max(0, Math.min(1, pct)) * 260;
+        if (w < 1) return;
+        barFill.fillStyle(info.rank.color, 1);
+        barFill.fillRoundedRect(-130, 211, w, 7, 3.5);
+      };
+      drawBar(rm ? toPct : fromPct);
+      const barLabel = info.next
+        ? txt(
+            0,
+            229,
+            P.rankedUp
+              ? `★ RANK UP · ${info.rank.name} ★`
+              : `${info.into.toLocaleString()} / ${info.span.toLocaleString()} XP TO ${info.next.name}`,
+            9,
+            P.rankedUp ? gold : "#9bb7ff",
+            P.rankedUp
+          )
+        : txt(0, 229, "MAX RANK REACHED", 9, gold, true);
+      const nb = P.newBadges[0];
+      const dailyLine = txt(
+        0,
+        246,
+        `DAILY ${P.doneCount}/${P.challenges.length}` +
+          (nb ? `  ·  NEW BADGE: ${nb.name.toUpperCase()}${P.newBadges.length > 1 ? ` +${P.newBadges.length - 1}` : ""}` : ""),
+        10,
+        nb ? gold : cyan
+      );
+      revealUp([rankLine, barBg, barFill, barLabel, dailyLine], 1250);
+      if (!rm) {
+        this.tweens.addCounter({
+          from: fromPct,
+          to: toPct,
+          duration: 900,
+          delay: 1450,
+          ease: "Cubic.easeOut",
+          onUpdate: (tw) => drawBar(tw.getValue()),
+        });
+        if (P.rankedUp) this.time.delayedCall(1700, () => this.panel && this.celebrate());
+      }
+    }
+
     // --- COSMIC FACT card (height measured from the text, so nothing can overlap) ---
-    const cardTop = 200;
+    const cardTop = 258;
     const textW = FACT_CARD_W - 32;
     const card = this.add.container(0, 0);
     content.add(card);
@@ -1344,47 +1526,72 @@ export default class GameScene extends Phaser.Scene {
       this.tweens.add({ targets: bg, alpha: 0.65, duration: 900, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
     }
 
-    // LEADERBOARD button (smaller, below PLAY AGAIN)
+    // LEADERBOARD + PROGRESS (two half-width buttons)
     const lbY = btnY + 52;
-    const lbBtn = this.add.container(0, lbY);
-    const lbBg = this.add.graphics();
-    const drawLb = (hover) => {
-      lbBg.clear();
-      lbBg.fillStyle(PALETTE.violet, hover ? 0.34 : 0.18);
-      lbBg.fillRoundedRect(-95, -18, 190, 36, 10);
-      lbBg.lineStyle(1.5, PALETTE.violet, hover ? 1 : 0.7);
-      lbBg.strokeRoundedRect(-95, -18, 190, 36, 10);
+    const smallBtn = (x, y, w, text, color, onClick) => {
+      const b = this.add.container(x, y);
+      const g = this.add.graphics();
+      const draw = (hover) => {
+        g.clear();
+        g.fillStyle(color, hover ? 0.34 : 0.18);
+        g.fillRoundedRect(-w / 2, -18, w, 36, 10);
+        g.lineStyle(1.5, color, hover ? 1 : 0.7);
+        g.strokeRoundedRect(-w / 2, -18, w, 36, 10);
+      };
+      draw(false);
+      const t = this.add
+        .text(0, 0, text, { fontFamily: FONT, fontSize: "11px", color: "#e3dcff", fontStyle: "bold" })
+        .setOrigin(0.5);
+      const h = this.add.rectangle(0, 0, w, 36, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
+      b.add([g, t, h]);
+      content.add(b);
+      h.on("pointerover", () => {
+        draw(true);
+        this.tweens.add({ targets: b, scale: 1.05, duration: rm ? 1 : 120 });
+      });
+      h.on("pointerout", () => {
+        draw(false);
+        this.tweens.add({ targets: b, scale: 1, duration: rm ? 1 : 120 });
+      });
+      h.on("pointerdown", () => {
+        if (this.resultsReady) onClick();
+      });
+      return b;
     };
-    drawLb(false);
-    const lbLabel = this.add
-      .text(0, 0, "LEADERBOARD", { fontFamily: FONT, fontSize: "13px", color: "#d9c8ff", fontStyle: "bold" })
-      .setOrigin(0.5);
-    const lbHit = this.add.rectangle(0, 0, 190, 36, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
-    lbBtn.add([lbBg, lbLabel, lbHit]);
-    content.add(lbBtn);
-    lbHit.on("pointerover", () => {
-      drawLb(true);
-      this.tweens.add({ targets: lbBtn, scale: 1.05, duration: rm ? 1 : 120 });
-    });
-    lbHit.on("pointerout", () => {
-      drawLb(false);
-      this.tweens.add({ targets: lbBtn, scale: 1, duration: rm ? 1 : 120 });
-    });
-    lbHit.on("pointerdown", () => {
-      if (this.resultsReady) this.showLeaderboard();
-    });
+    const lbBtn = smallBtn(-78, lbY, 148, "LEADERBOARD", PALETTE.violet, () => this.showLeaderboard());
+    const pgBtn = smallBtn(78, lbY, 148, "PROGRESS", PALETTE.cyan, () => this.progressUi.open("rank"));
 
-    const hint = txt(0, lbY + 34, "or press SPACE / ENTER", 10, "#7a86b8");
+    // next-run mode toggle (Classic <-> Supernova). Keyboard: N
+    const modeBtn = this.add.container(0, lbY + 34);
+    const modeText = this.add
+      .text(0, 0, "", { fontFamily: FONT, fontSize: "11px", color: cyan, fontStyle: "bold" })
+      .setOrigin(0.5)
+      .setPadding(14, 8, 14, 8)
+      .setInteractive({ useHandCursor: true });
+    const drawMode = () => {
+      const m = MODES[getMode()];
+      modeText.setText(`NEXT RUN  ·  ${m.label}  ⇄`);
+      modeText.setColor(css(m.color));
+    };
+    drawMode();
+    modeText.on("pointerdown", () => {
+      if (!this.resultsReady) return;
+      setMode(getMode() === "classic" ? "supernova" : "classic");
+      drawMode();
+    });
+    modeBtn.add(modeText);
+    content.add(modeBtn);
+    this.modeRowRefresh = drawMode;
 
     // buttons fade in just before input goes live, so nothing invisible can be clicked
     if (!rm) {
-      [btn, lbBtn, hint].forEach((o, i) => {
+      [btn, lbBtn, pgBtn, modeBtn].forEach((o, i) => {
         o.setAlpha(0);
         this.tweens.add({ targets: o, alpha: 1, duration: 350, delay: 800 + i * 110 });
       });
     }
 
-    // final panel height: original bottom margin (12px) below the hint text
+    // final panel height: original bottom margin (12px) below the last row
     const panelH = Math.max(PANEL_H, lbY + 34 + 12 + 260);
     this.panelH = panelH;
     const contentY = -panelH / 2 + 260;
@@ -1482,6 +1689,9 @@ export default class GameScene extends Phaser.Scene {
       });
     }
 
+    // reward banners: rank up, missions, streak, sweep, badges (one after another)
+    if (P) this.queueToasts(this.buildToasts(P), rm ? 400 : 2400);
+
     // input becomes live once the buttons have appeared
     this.time.delayedCall(rm ? 0 : 900, () => {
       // flush key presses made during play so they cannot trigger an instant restart
@@ -1522,14 +1732,14 @@ export default class GameScene extends Phaser.Scene {
     return c;
   }
 
-  showLeaderboard() {
+  showLeaderboard(boardMode = getMode()) {
     if (this.lbPanel) return; // already open
     const rm = this.reduceMotion;
     const cyan = css(PALETTE.cyan);
     const gold = css(PALETTE.gold);
     const me = getPlayerName();
 
-    const all = getRankedScores();
+    const all = boardMode === "supernova" ? getSupernovaRanked() : getRankedScores();
     const top = all.slice(0, LB_MAX_ROWS);
     const myIdx = all.findIndex((e) => e.name === me);
     const extra = myIdx >= LB_MAX_ROWS ? all[myIdx] : null; // my row when I'm outside the top list
@@ -1603,8 +1813,20 @@ export default class GameScene extends Phaser.Scene {
     };
 
     // header
-    const title = mk(0, topY + 36, "LEADERBOARD", 20, "#eafcff", true, 0.5, 4);
-    title.setShadow(0, 0, cyan, 12, false, true);
+    const sn = boardMode === "supernova";
+    const accent = css(sn ? PALETTE.pink : PALETTE.cyan);
+    const title = mk(0, topY + 36, sn ? "SUPERNOVA BOARD" : "LEADERBOARD", sn ? 17 : 20, "#eafcff", true, 0.5, 4);
+    title.setShadow(0, 0, accent, 12, false, true);
+
+    // switch to the other mode's board
+    const other = sn ? "classic" : "supernova";
+    const sw = mk(LB_W / 2 - 16, topY + 14, `${MODES[other].label} ▸`, 9, css(MODES[other].color), true, 1, 1);
+    sw.setPadding(8).setInteractive({ useHandCursor: true });
+    sw.on("pointerdown", () => {
+      this.hideLeaderboard();
+      this.showLeaderboard(other);
+    });
+    mk(0, topY + H - 11, "SCORES ARE SAVED ON THIS DEVICE ONLY", 8, "#58628f");
 
     // column headers
     mk(-128, topY + 84, "RANK", 9, "#7a86b8", false, 0.5, 2);
@@ -1829,6 +2051,7 @@ export default class GameScene extends Phaser.Scene {
     if (this.planetShade) this.planetShade.setPosition(px - r * 0.2, py - r * 0.2).setRadius(r * 0.78);
     if (this.planetGlow) this.planetGlow.setPosition(px, py).setScale((r * 3) / 64);
     if (this.planetRing) this.planetRing.setPosition(px, py).setSize(r * 2.9, r * 0.62);
+    if (this.progressUi) this.progressUi.layout();
   }
 
   updateResults(time, dt) {
@@ -1910,6 +2133,10 @@ export default class GameScene extends Phaser.Scene {
 
     if (this.isGameOver) {
       if (this.panel) this.updateResults(time, dt);
+      if (this.resultsReady && Phaser.Input.Keyboard.JustDown(this.keys.N)) {
+        setMode(getMode() === "classic" ? "supernova" : "classic");
+        if (this.modeRowRefresh) this.modeRowRefresh();
+      }
       if (
         this.resultsReady &&
         !this.restarting &&
@@ -1917,13 +2144,14 @@ export default class GameScene extends Phaser.Scene {
       ) {
         // with the leaderboard open, SPACE/ENTER closes it instead of restarting behind it
         if (this.lbPanel) this.hideLeaderboard();
+        else if (this.progressUi.isOpen) this.progressUi.close();
         else this.restartGame();
       }
       return;
     }
 
     // --- difficulty: owns asteroid spawning (position + speed per formation) ---
-    const spawns = this.difficulty.update(delta, {
+    const spawns = this.difficulty.update(delta * (this.supernova ? SUPERNOVA.clock : 1),{
       minX: laneX,
       maxX: laneX + laneW,
       size: ASTEROID_SIZE,
@@ -1931,7 +2159,7 @@ export default class GameScene extends Phaser.Scene {
       shipY: this.ship.y,
       shipW: this.ship.displayWidth,
       shipSpeed: BASE_SPEED, // un-boosted speed: conservative for gap reachability
-      baseSpeed: BASE_FALL,
+      baseSpeed: BASE_FALL * (this.supernova ? SUPERNOVA.fall : 1),
       active: this.asteroids.length,
     });
     for (const s of spawns) this.spawnAsteroid(s.x, s.y, s.vx, s.vy);
@@ -1940,7 +2168,7 @@ export default class GameScene extends Phaser.Scene {
     const lvl = this.difficulty.level;
     if (lvl !== this.shownLevel) {
       this.shownLevel = lvl;
-      this.threatText.setText(`THREAT LEVEL ${lvl}`);
+      this.threatText.setText(this.threatLabel(lvl));
     }
     this.level = lvl - 1; // drives background speed, Voidling rate, distance rate (capped at 5)
 
