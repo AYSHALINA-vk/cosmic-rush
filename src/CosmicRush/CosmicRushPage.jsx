@@ -1,5 +1,4 @@
 import GameCanvas from "./components/GameCanvas";
-import LeaderboardOverlay from "./components/LeaderboardOverlay";
 
 export default function CosmicRushPage() {
   return (
@@ -21,7 +20,6 @@ export default function CosmicRushPage() {
       }}
     >
       <GameCanvas />
-      <LeaderboardOverlay />
     </div>
   );
 }

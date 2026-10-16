@@ -111,8 +111,8 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-// translucent glass panel: gradient fill, nebula glows, top sheen, divider, gradient neon border
-function makeGlassTexture(scene, key, w, h) {
+// translucent glass panel: gradient fill, nebula glows, top sheen, optional divider, gradient neon border
+function makeGlassTexture(scene, key, w, h, withDivider = true) {
   if (scene.textures.exists(key)) return true;
   try {
     const S = LB_TEX_S;
@@ -166,14 +166,16 @@ function makeGlassTexture(scene, key, w, h) {
     ctx.fillStyle = sheen;
     ctx.fillRect(0, 0, w, h * 0.35);
 
-    // header divider
-    const div = ctx.createLinearGradient(24, 0, w - 24, 0);
-    div.addColorStop(0, "rgba(25,221,245,0)");
-    div.addColorStop(0.3, "rgba(25,221,245,0.7)");
-    div.addColorStop(0.7, "rgba(150,90,255,0.7)");
-    div.addColorStop(1, "rgba(150,90,255,0)");
-    ctx.fillStyle = div;
-    ctx.fillRect(24, LB_HEADER_DIV, w - 48, 1.2);
+    // header divider (leaderboard only)
+    if (withDivider) {
+      const div = ctx.createLinearGradient(24, 0, w - 24, 0);
+      div.addColorStop(0, "rgba(25,221,245,0)");
+      div.addColorStop(0.3, "rgba(25,221,245,0.7)");
+      div.addColorStop(0.7, "rgba(150,90,255,0.7)");
+      div.addColorStop(1, "rgba(150,90,255,0)");
+      ctx.fillStyle = div;
+      ctx.fillRect(24, LB_HEADER_DIV, w - 48, 1.2);
+    }
     ctx.restore();
 
     // gradient neon border (with glow)
@@ -201,6 +203,40 @@ function makeGlassTexture(scene, key, w, h) {
   } catch (e) {
     return false;
   }
+}
+
+// point at distance d along the border of a rounded rectangle centred on (0,0), clockwise
+function borderPoint(d, w, h, r) {
+  const sw = w - 2 * r;
+  const sh = h - 2 * r;
+  const arc = (Math.PI * r) / 2;
+  const total = 2 * sw + 2 * sh + 4 * arc;
+  d = ((d % total) + total) % total;
+  if (d < sw) return { x: -w / 2 + r + d, y: -h / 2 };
+  d -= sw;
+  if (d < arc) {
+    const a = -Math.PI / 2 + d / r;
+    return { x: w / 2 - r + Math.cos(a) * r, y: -h / 2 + r + Math.sin(a) * r };
+  }
+  d -= arc;
+  if (d < sh) return { x: w / 2, y: -h / 2 + r + d };
+  d -= sh;
+  if (d < arc) {
+    const a = d / r;
+    return { x: w / 2 - r + Math.cos(a) * r, y: h / 2 - r + Math.sin(a) * r };
+  }
+  d -= arc;
+  if (d < sw) return { x: w / 2 - r - d, y: h / 2 };
+  d -= sw;
+  if (d < arc) {
+    const a = Math.PI / 2 + d / r;
+    return { x: -w / 2 + r + Math.cos(a) * r, y: h / 2 - r + Math.sin(a) * r };
+  }
+  d -= arc;
+  if (d < sh) return { x: -w / 2, y: h / 2 - r - d };
+  d -= sh;
+  const a = Math.PI + d / r;
+  return { x: -w / 2 + r + Math.cos(a) * r, y: -h / 2 + r + Math.sin(a) * r };
 }
 
 export default class GameScene extends Phaser.Scene {
@@ -289,6 +325,9 @@ export default class GameScene extends Phaser.Scene {
     this.planet = null;
     this.planetShade = null;
     this.planetGlow = null;
+    this.planetRing = null;
+    this.borderComet = null;
+    this.resultOrbit = null;
     this.driftDots = [];
     this.resultChars = [];
     this._rw = 0;
@@ -456,6 +495,25 @@ export default class GameScene extends Phaser.Scene {
         shrink: true,
       });
     }
+  }
+
+  // expanding ring where the ship was destroyed
+  shockwave(x, y) {
+    if (this.reduceMotion) return;
+    const ring = this.add.circle(x, y, 12).setStrokeStyle(3, PALETTE.cyan, 0.9).setBlendMode(ADD).setDepth(7);
+    const to = Math.max(this.scale.width, this.scale.height) * 0.55;
+    this.tweens.addCounter({
+      from: 12,
+      to,
+      duration: 850,
+      ease: "Cubic.easeOut",
+      onUpdate: (tw) => {
+        const v = tw.getValue();
+        ring.setRadius(v);
+        ring.setAlpha(Math.max(0, 1 - (v - 12) / (to - 12)));
+      },
+      onComplete: () => ring.destroy(),
+    });
   }
 
   updateShipFx(time, dt) {
@@ -979,6 +1037,7 @@ export default class GameScene extends Phaser.Scene {
     this.clearWarnings();
 
     this.burst(this.ship.x, this.ship.y, 0x00e5ff, 24);
+    this.shockwave(this.ship.x, this.ship.y);
     this.ship.setVisible(false);
     this.glow.setVisible(false);
     this.flameOuter.setVisible(false);
@@ -999,6 +1058,7 @@ export default class GameScene extends Phaser.Scene {
       distance: Math.floor(this.distance),
       time: this.elapsed,
       stardust: this.stardust,
+      threat: this.difficulty.level,
       collected: { ...this.collected },
       constellations: [...this.conDoneNames],
       fact: pickRandomFact(), // chosen exactly once per Game Over (endGame is guarded above)
@@ -1027,9 +1087,9 @@ export default class GameScene extends Phaser.Scene {
     const pink = css(PALETTE.pink);
     const gold = css(PALETTE.gold);
 
-    // --- dim layer, planet, drifting particles ---
+    // --- dim layer (lighter so the living background shows through), planet + ring, drifting particles ---
     this.dim = this.add.rectangle(0, 0, width, height, 0x070914, 1).setOrigin(0).setDepth(20).setAlpha(0);
-    this.tweens.add({ targets: this.dim, alpha: 0.82, duration: fadeMs });
+    this.tweens.add({ targets: this.dim, alpha: 0.64, duration: fadeMs });
 
     const backdrop = [];
     if (this.textures.exists("bg_glow")) {
@@ -1038,7 +1098,8 @@ export default class GameScene extends Phaser.Scene {
     }
     this.planet = this.add.circle(0, 0, 10, PALETTE.violet, 0.45).setStrokeStyle(2, PALETTE.cyan, 0.35).setDepth(21);
     this.planetShade = this.add.circle(0, 0, 10, PALETTE.pink, 0.12).setDepth(21);
-    backdrop.push(this.planet, this.planetShade);
+    this.planetRing = this.add.ellipse(0, 0, 10, 10).setStrokeStyle(2, PALETTE.cyan, 0.4).setRotation(-0.32).setDepth(21);
+    backdrop.push(this.planet, this.planetShade, this.planetRing);
     backdrop.forEach((o) => o.setAlpha(0));
     this.tweens.add({
       targets: backdrop,
@@ -1069,13 +1130,11 @@ export default class GameScene extends Phaser.Scene {
     });
 
     // --- panel ---
-    // bgG is drawn last, once the final height (which depends on the fact text) is known.
-    // `content` holds everything else: its y=0 is the top of the panel, shifted by 260 so
-    // the original layout coordinates (title at -218, button at 212, ...) still apply.
+    // The glass image is added last (index 0), once the final height is known.
+    // `content` y=0 is the top of the panel shifted by 260, so the layout coordinates below still apply.
     const panel = this.add.container(0, 0).setDepth(23).setAlpha(0);
-    const bgG = this.add.graphics();
     const content = this.add.container(0, 0);
-    panel.add([bgG, content]);
+    panel.add(content);
 
     const dividers = this.add.graphics();
     dividers.lineStyle(1, PALETTE.violet, 0.5);
@@ -1091,8 +1150,71 @@ export default class GameScene extends Phaser.Scene {
       return t;
     };
 
+    // rise + fade in (skipped with reduced motion)
+    const revealUp = (objs, delay) => {
+      if (rm) return;
+      for (const o of objs) {
+        const y = o.y;
+        o.setAlpha(0);
+        o.y = y + 10;
+        this.tweens.add({ targets: o, alpha: 1, y, duration: 420, delay, ease: "Cubic.easeOut" });
+      }
+    };
+
+    // a thin ring around the score with a small moon orbiting it (behind the score text)
+    this.resultOrbit = null;
+    if (!rm) {
+      const orbit = this.add.container(0, -100).setRotation(-0.1).setAlpha(0);
+      const ringLine = this.add.ellipse(0, 0, 292, 62).setStrokeStyle(1.2, PALETTE.cyan, 0.4);
+      const halo = this.add.circle(0, 0, 8, PALETTE.gold, 0.28).setBlendMode(ADD);
+      const moon = this.add.circle(0, 0, 3, 0xfff3b0);
+      orbit.add([ringLine, halo, moon]);
+      content.add(orbit);
+      this.tweens.add({ targets: orbit, alpha: 1, duration: 700, delay: 800 });
+      this.resultOrbit = { moon, halo };
+    }
+
     txt(0, -218, "COSMIC RUSH", 13, cyan).setAlpha(0.85);
-    txt(0, -186, MISSION_TITLE, 26, pink, true).setShadow(0, 0, pink, 14, false, true);
+
+    // title with a chromatic glitch reveal
+    const ghostA = txt(0, -186, MISSION_TITLE, 26, cyan, true).setBlendMode(ADD).setAlpha(0);
+    const ghostB = txt(0, -186, MISSION_TITLE, 26, css(PALETTE.violet), true).setBlendMode(ADD).setAlpha(0);
+    const title = txt(0, -186, MISSION_TITLE, 26, pink, true);
+    title.setShadow(0, 0, pink, 14, false, true);
+    const sub = txt(0, -162, r.threat ? `REACHED THREAT LEVEL ${r.threat}` : "RUN COMPLETE", 10, cyan);
+    if (!rm) {
+      title.setAlpha(0).setScale(1.12);
+      sub.setAlpha(0);
+      this.tweens.add({ targets: title, alpha: 1, scale: 1, duration: 420, delay: 500, ease: "Cubic.easeOut" });
+      this.tweens.add({ targets: sub, alpha: 0.85, duration: 500, delay: 800 });
+      this.tweens.add({
+        targets: ghostA,
+        x: { from: -10, to: -1.5 },
+        alpha: { from: 0.7, to: 0.3 },
+        duration: 650,
+        delay: 500,
+        ease: "Cubic.easeOut",
+      });
+      this.tweens.add({
+        targets: ghostB,
+        x: { from: 10, to: 1.5 },
+        alpha: { from: 0.7, to: 0.3 },
+        duration: 650,
+        delay: 500,
+        ease: "Cubic.easeOut",
+      });
+      // a brief glitch every few seconds (the scene clock cleans this up on restart)
+      this.time.addEvent({
+        delay: 3600,
+        loop: true,
+        callback: () => {
+          if (!this.panel || this.restarting) return;
+          this.tweens.add({ targets: ghostA, x: -6, alpha: 0.7, duration: 70, yoyo: true });
+          this.tweens.add({ targets: ghostB, x: 6, alpha: 0.7, duration: 70, yoyo: true });
+        },
+      });
+    }
+
     txt(0, -138, "FINAL SCORE", 11, "#9bb7ff");
     const scoreTxt = txt(0, -100, "0", 48, gold, true);
     scoreTxt.setShadow(0, 0, gold, 10, false, true);
@@ -1107,35 +1229,42 @@ export default class GameScene extends Phaser.Scene {
       txt(0, -34, `${r.needed.toLocaleString()} MORE POINT${r.needed === 1 ? "" : "S"} TO BEAT IT`, 10, cyan);
     }
 
-    // stats row
+    // stats row (staggered)
     [
       [-115, "DISTANCE", `${r.distance.toLocaleString()} m`, "#ffffff"],
       [0, "SURVIVED", fmtTime(r.time), "#ffffff"],
       [115, "STARDUST", `${r.stardust}`, gold],
-    ].forEach(([x, label, value, color]) => {
-      txt(x, 14, label, 10, "#7a86b8");
-      txt(x, 38, value, 18, color, true);
+    ].forEach(([x, label, value, color], i) => {
+      const a = txt(x, 14, label, 10, "#7a86b8");
+      const b = txt(x, 38, value, 18, color, true);
+      revealUp([a, b], 700 + i * 140);
     });
 
-    // characters collected this run (only those actually collected)
-    txt(0, 86, "CREW COLLECTED", 10, "#7a86b8");
+    // characters collected this run (they bounce in one after another)
+    revealUp([txt(0, 86, "CREW COLLECTED", 10, "#7a86b8")], 900);
     const kinds = ["stella", "fox", "luma"].filter((k) => r.collected[k] > 0);
     if (kinds.length === 0) {
-      txt(0, 128, "none this run", 12, "#7a86b8");
+      revealUp([txt(0, 128, "none this run", 12, "#7a86b8")], 1000);
     } else {
       const spacing = 100;
       kinds.forEach((k, i) => {
         const x = (i - (kinds.length - 1) / 2) * spacing;
-        const ch = CHAR_CONFIG[k].make(this).setScale(0.8).setPosition(x, 126);
+        const ch = CHAR_CONFIG[k].make(this).setPosition(x, 126);
         content.add(ch); // moves it from the scene display list into the panel
         this.resultChars.push(ch);
-        txt(x, 160, `${CREW_NAMES[k]} ×${r.collected[k]}`, 11, "#ffffff");
+        if (rm) {
+          ch.setScale(0.8);
+        } else {
+          ch.setScale(0);
+          this.tweens.add({ targets: ch, scale: 0.8, duration: 450, delay: 1000 + i * 160, ease: "Back.easeOut" });
+        }
+        revealUp([txt(x, 160, `${CREW_NAMES[k]} ×${r.collected[k]}`, 11, "#ffffff")], 1100 + i * 160);
       });
     }
 
     // constellations completed this run (only shown when there is one)
     if (r.constellations.length > 0) {
-      txt(0, 176, `★ ${r.constellations.join(", ").toUpperCase()} COMPLETE`, 10, gold);
+      revealUp([txt(0, 176, `★ ${r.constellations.join(", ").toUpperCase()} COMPLETE`, 10, gold)], 1200);
     }
 
     // --- COSMIC FACT card (height measured from the text, so nothing can overlap) ---
@@ -1177,7 +1306,8 @@ export default class GameScene extends Phaser.Scene {
     cardBg.fillCircle(FACT_CARD_W / 2 - 14, cardTop + 18, 1.6);
 
     card.setAlpha(0);
-    this.tweens.add({ targets: card, alpha: 1, duration: fadeMs, delay: rm ? 0 : 900 });
+    if (!rm) card.y = 14;
+    this.tweens.add({ targets: card, alpha: 1, y: 0, duration: fadeMs, delay: rm ? 0 : 1000, ease: "Cubic.easeOut" });
 
     // PLAY AGAIN button (below the card)
     const btnY = cardTop + cardH + 38;
@@ -1244,25 +1374,92 @@ export default class GameScene extends Phaser.Scene {
       if (this.resultsReady) this.showLeaderboard();
     });
 
-    txt(0, lbY + 34, "or press SPACE / ENTER", 10, "#7a86b8");
+    const hint = txt(0, lbY + 34, "or press SPACE / ENTER", 10, "#7a86b8");
+
+    // buttons fade in just before input goes live, so nothing invisible can be clicked
+    if (!rm) {
+      [btn, lbBtn, hint].forEach((o, i) => {
+        o.setAlpha(0);
+        this.tweens.add({ targets: o, alpha: 1, duration: 350, delay: 800 + i * 110 });
+      });
+    }
 
     // final panel height: original bottom margin (12px) below the hint text
     const panelH = Math.max(PANEL_H, lbY + 34 + 12 + 260);
     this.panelH = panelH;
-    content.setPosition(0, -panelH / 2 + 260);
-    bgG.fillStyle(0x0b1030, 0.78);
-    bgG.fillRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 18);
-    bgG.lineStyle(1.5, PALETTE.cyan, 0.4);
-    bgG.strokeRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 18);
+    const contentY = -panelH / 2 + 260;
+    content.setPosition(0, contentY);
+
+    // glass body (index 0 = behind the content)
+    const glassKey = `go_glass_${PANEL_W}x${panelH}`;
+    let glass;
+    let glassBase = 1; // scale of the finished glass (the texture is drawn at 2x)
+    if (makeGlassTexture(this, glassKey, PANEL_W, panelH, false)) {
+      glassBase = 1 / LB_TEX_S;
+      glass = this.add.image(0, 0, glassKey).setScale(glassBase);
+    } else {
+      glass = this.add.graphics(); // fallback if canvas textures are unavailable
+      glass.fillStyle(0x0b1030, 0.78);
+      glass.fillRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 18);
+      glass.lineStyle(1.5, PALETTE.cyan, 0.4);
+      glass.strokeRoundedRect(-PANEL_W / 2, -panelH / 2, PANEL_W, panelH, 18);
+    }
+    panel.addAt(glass, 0);
+
+    // a comet of light that circles the panel border
+    this.borderComet = null;
+    if (!rm) {
+      const dots = [];
+      for (let i = 0; i < 10; i++) {
+        const dot = this.add
+          .circle(0, 0, 3.2 - i * 0.25, i < 3 ? PALETTE.cyan : PALETTE.violet)
+          .setBlendMode(ADD)
+          .setAlpha(0);
+        panel.add(dot);
+        dots.push(dot);
+      }
+      this.borderComet = { d: 0, dots, w: PANEL_W - 2, h: panelH - 2 };
+    }
 
     this.panel = panel;
     this.layoutResults(true);
 
-    // --- entrance ---
+    // --- entrance: the glass unfolds and the content settles into place ---
     this.tweens.add({ targets: panel, alpha: 1, duration: fadeMs, delay: rm ? 0 : 350 });
+    if (!rm) {
+      glass.setScale(glassBase * 0.94);
+      this.tweens.add({
+        targets: glass,
+        scaleX: glassBase,
+        scaleY: glassBase,
+        duration: 650,
+        delay: 350,
+        ease: "Back.easeOut",
+      });
+      content.y = contentY + 16;
+      this.tweens.add({ targets: content, y: contentY, duration: 650, delay: 350, ease: "Cubic.easeOut" });
+    }
 
     const showFinal = () => {
       scoreTxt.setText(r.score.toLocaleString());
+      if (!rm) {
+        // score pop + gold ripple
+        this.tweens.add({ targets: scoreTxt, scale: 1.16, duration: 150, yoyo: true, ease: "Quad.easeOut" });
+        const ripple = this.add.circle(0, -100, 24).setStrokeStyle(2, PALETTE.gold, 0.9).setBlendMode(ADD);
+        content.add(ripple);
+        this.tweens.addCounter({
+          from: 24,
+          to: 160,
+          duration: 700,
+          ease: "Cubic.easeOut",
+          onUpdate: (tw) => {
+            const v = tw.getValue();
+            ripple.setRadius(v);
+            ripple.setAlpha(Math.max(0, 1 - (v - 24) / 136));
+          },
+          onComplete: () => ripple.destroy(),
+        });
+      }
       if (badge) {
         badge.setAlpha(1);
         if (!rm) {
@@ -1285,8 +1482,8 @@ export default class GameScene extends Phaser.Scene {
       });
     }
 
-    // input becomes live a moment after the panel appears
-    this.time.delayedCall(rm ? 0 : 700, () => {
+    // input becomes live once the buttons have appeared
+    this.time.delayedCall(rm ? 0 : 900, () => {
       // flush key presses made during play so they cannot trigger an instant restart
       Phaser.Input.Keyboard.JustDown(this.keys.SPACE);
       Phaser.Input.Keyboard.JustDown(this.keys.ENTER);
@@ -1631,6 +1828,7 @@ export default class GameScene extends Phaser.Scene {
     if (this.planet) this.planet.setPosition(px, py).setRadius(r);
     if (this.planetShade) this.planetShade.setPosition(px - r * 0.2, py - r * 0.2).setRadius(r * 0.78);
     if (this.planetGlow) this.planetGlow.setPosition(px, py).setScale((r * 3) / 64);
+    if (this.planetRing) this.planetRing.setPosition(px, py).setSize(r * 2.9, r * 0.62);
   }
 
   updateResults(time, dt) {
@@ -1638,6 +1836,26 @@ export default class GameScene extends Phaser.Scene {
     for (const ch of this.resultChars) ch.tick(time);
     if (this.reduceMotion) return;
     const { width, height } = this.scale;
+
+    // comet of light circling the panel border
+    const bc = this.borderComet;
+    if (bc) {
+      bc.d += 170 * dt;
+      bc.dots.forEach((dot, i) => {
+        const p = borderPoint(bc.d - i * 9, bc.w, bc.h, 21);
+        dot.setPosition(p.x, p.y).setAlpha(0.95 * (1 - i / bc.dots.length));
+      });
+    }
+
+    // moon orbiting the score
+    const o = this.resultOrbit;
+    if (o) {
+      const a = time / 1100;
+      const x = Math.cos(a) * 146;
+      const y = Math.sin(a) * 31;
+      o.moon.setPosition(x, y);
+      o.halo.setPosition(x, y);
+    }
 
     // floating stars inside the leaderboard glass
     for (const s of this.lbStars) {
